@@ -7,6 +7,11 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      # Major upgrades can change archive and cryptography behavior and require
+      # an explicit compatibility/security review rather than an automated PR.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
