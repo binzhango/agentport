@@ -6,8 +6,8 @@ Releases are published to crates.io from GitHub Actions when a `v<version>` tag 
 
 1. Sign in to crates.io, verify your email, and confirm that `agentport` is available.
 2. Create a crates.io API token scoped to publishing `agentport` when available.
-3. In GitHub, create an environment named `crates-io` and add the token as the `CRATES_IO_TOKEN` environment secret.
-4. Protect the environment with required reviewers if desired.
+3. In GitHub, add the token as the repository secret `CARGO_REGISTRY_TOKEN`. The publish job maps this secret to Cargo's standard environment variable of the same name.
+4. The workflow uses a `crates-io` deployment environment; configure required reviewers for it if desired.
 
 ## Release checklist
 
