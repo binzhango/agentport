@@ -1,0 +1,46 @@
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches crate version
+        shell: bash
+        run: |
+          crate_version="$(cargo pkgid | sed 's/.*@//')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$crate_version" != "$tag_version" ]]; then
+            echo "Tag version $tag_version does not match Cargo.toml version $crate_version" >&2
+            exit 1
+          fi
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features --locked
+      - run: cargo publish --dry-run --locked
+
+      - name: Publish crate
+        # The preceding dry run verified the same checkout. Avoid rebuilding while
+        # the registry token is present in this step's environment.
+        run: cargo publish --locked --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

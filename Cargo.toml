@@ -1,0 +1,49 @@
+[package]
+name = "agentport"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Bin Zhang"]
+description = "A unified TUI installer for AI agent skills and plugins"
+license = "MIT"
+repository = "https://github.com/binzhango/agentport"
+homepage = "https://github.com/binzhango/agentport"
+documentation = "https://docs.rs/agentport"
+readme = "README.md"
+publish = ["crates-io"]
+keywords = ["ai", "agents", "skills", "tui", "plugins"]
+categories = ["command-line-utilities", "development-tools"]
+include = [
+    "src/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "RELEASING.md",
+]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+dirs = "6.0"
+flate2 = "1.1"
+fs2 = "0.4"
+ratatui = "0.30"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3.20"
+url = "2.5"
+walkdir = "2.5"
+zip = { version = "4.3", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
