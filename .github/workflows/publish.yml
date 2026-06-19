@@ -18,8 +18,11 @@ jobs:
     environment: crates-io
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      # Keep the action revision separate from the Rust version so dependency
+      # automation cannot turn an unreleased toolchain into a workflow update.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.88.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 

@@ -12,3 +12,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # These refs name Rust channels/toolchains, not action releases.
+      - dependency-name: dtolnay/rust-toolchain

@@ -34,6 +34,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      # Keep the action revision separate from the MSRV. Dependabot otherwise
+      # mistakes Rust toolchain tags for action versions.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --dry-run --locked
