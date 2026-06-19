@@ -411,10 +411,14 @@ pub fn execute_plan_with_runner(
     id_hasher.update(plan.package.as_bytes());
     id_hasher.update(plan.source.as_bytes());
     id_hasher.update(now.to_le_bytes());
-    let id = format!("{}-{:x}", slug(&plan.package), id_hasher.finalize())
-        .chars()
-        .take(32)
-        .collect();
+    let id = format!(
+        "{}-{}",
+        slug(&plan.package),
+        hex_bytes(&id_hasher.finalize())
+    )
+    .chars()
+    .take(32)
+    .collect();
     let installation = ManagedInstallation {
         id,
         package: plan.package.clone(),
@@ -560,7 +564,7 @@ fn github_repo_root(source: &str) -> Option<String> {
 fn short_hash(value: &str) -> String {
     let mut h = Sha256::new();
     h.update(value);
-    format!("{:x}", h.finalize())[..10].to_owned()
+    hex_bytes(&h.finalize())[..10].to_owned()
 }
 
 #[derive(Debug, Default)]
@@ -702,7 +706,17 @@ fn hash_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_bytes(&hasher.finalize()))
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 fn remove_path(path: &Path) -> Result<()> {
@@ -987,5 +1001,10 @@ mod tests {
             value["plugins"][0]["source"]["path"],
             "./plugins/demo-hooks"
         );
+    }
+
+    #[test]
+    fn formats_digest_bytes_as_lowercase_hex() {
+        assert_eq!(hex_bytes(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
     }
 }

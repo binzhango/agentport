@@ -104,7 +104,7 @@ impl Artifact {
             })
             .count();
         let extras = self.components.len().saturating_sub(skills);
-        format!("{} skill(s), {} extra component(s)", skills, extras)
+        format!("{skills} skill(s), {extras} extra component(s)")
     }
 }
 
