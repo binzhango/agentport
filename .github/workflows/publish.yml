@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # Keep the action revision separate from the Rust version so dependency
       # automation cannot turn an unreleased toolchain into a workflow update.
       - uses: dtolnay/rust-toolchain@master
