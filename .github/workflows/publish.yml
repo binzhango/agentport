@@ -29,7 +29,9 @@ jobs:
       - name: Verify tag matches crate version
         shell: bash
         run: |
-          crate_version="$(cargo pkgid | sed 's/.*@//')"
+          # Cargo 1.88 prints path package IDs ending in `#0.1.0`, while
+          # newer Cargo versions may include `@0.1.0`.
+          crate_version="$(cargo pkgid | sed -E 's/.*[#@]//')"
           tag_version="${GITHUB_REF_NAME#v}"
           if [[ "$crate_version" != "$tag_version" ]]; then
             echo "Tag version $tag_version does not match Cargo.toml version $crate_version" >&2
