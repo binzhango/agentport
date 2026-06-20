@@ -42,11 +42,39 @@ impl ArtifactScanner for DefaultScanner {
                     .to_owned()
             });
             let codex_plugin = codex_plugin_metadata(root, &artifact_root, &name)?;
+            if codex_plugin.is_some() {
+                for component in components.iter().filter(|component| {
+                    matches!(
+                        component.kind,
+                        ComponentKind::Skill | ComponentKind::Command
+                    )
+                }) {
+                    artifacts.push(Artifact {
+                        id: format!("{}--{}", slug(&name), slug(&component.name)),
+                        name: component.name.clone(),
+                        root: component.source.clone(),
+                        components: vec![component.clone()],
+                        codex_plugin: None,
+                    });
+                }
+            }
             artifacts.push(Artifact {
                 id: slug(&name),
                 name,
                 root: artifact_root,
-                components,
+                components: if codex_plugin.is_some() {
+                    components
+                        .into_iter()
+                        .filter(|component| {
+                            !matches!(
+                                component.kind,
+                                ComponentKind::Skill | ComponentKind::Command
+                            )
+                        })
+                        .collect()
+                } else {
+                    components
+                },
                 codex_plugin,
             });
         }
@@ -505,6 +533,54 @@ mod tests {
                 .components
                 .iter()
                 .any(|c| c.kind == ComponentKind::Plugin)
+        );
+    }
+
+    #[test]
+    fn exposes_codex_plugin_skills_as_standalone_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".codex-plugin")).unwrap();
+        fs::create_dir_all(temp.path().join("skills/ponytail")).unwrap();
+        fs::create_dir_all(temp.path().join("skills/ponytail-review")).unwrap();
+        fs::write(
+            temp.path().join(".codex-plugin/plugin.json"),
+            r#"{"name":"ponytail"}"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join("skills/ponytail/SKILL.md"), "ponytail").unwrap();
+        fs::write(
+            temp.path().join("skills/ponytail-review/SKILL.md"),
+            "review",
+        )
+        .unwrap();
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(
+            artifacts
+                .iter()
+                .filter(|artifact| artifact.codex_plugin.is_some())
+                .count(),
+            1
+        );
+        let standalone = artifacts
+            .iter()
+            .filter(|artifact| artifact.codex_plugin.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(standalone.len(), 2);
+        assert!(standalone.iter().all(|artifact| {
+            artifact.components.len() == 1 && artifact.components[0].kind == ComponentKind::Skill
+        }));
+        let plugin = artifacts
+            .iter()
+            .find(|artifact| artifact.codex_plugin.is_some())
+            .unwrap();
+        assert!(
+            plugin
+                .components
+                .iter()
+                .all(|component| component.kind != ComponentKind::Skill)
         );
     }
 

@@ -13,24 +13,21 @@ cargo package --locked
 
 Keep installation behavior transactional, never overwrite unmanaged paths, and add regression tests for scanner, planning, rollback, and uninstall changes.
 
-## Isolated Codex testing
+## Isolated TUI testing
 
-Build the included container and create a disposable home volume:
+Build the image and run Agentport interactively:
 
 ```sh
 podman build -t agentport-test .
-podman volume create agentport-test-home
-podman run --rm -it \
-  -v agentport-test-home:/home/tester \
-  -v /absolute/path/to/package:/input/package:ro,Z \
-  agentport-test
+podman run --rm -it agentport-test
 ```
 
-Remove `,Z` when SELinux labeling is unavailable. Inside the container, run `agentport /input/package`, inspect `$CODEX_HOME`, and open Codex to verify `/skills`, `/plugins`, and `/hooks`. Never mount your real home directory into this test container.
+Enter a public GitHub repository URL in the TUI, then verify source scanning,
+selection, destination preview, approval prompts, and installation completion.
+The image includes the Codex CLI so native plugin installation can also be
+tested. The container and installed files are discarded when the TUI exits.
 
-```sh
-podman volume rm agentport-test-home
-```
+See [Verify the TUI with Podman](docs/podman-setup.md) for the complete workflow.
 
 ## Pull requests
 

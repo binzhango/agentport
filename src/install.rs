@@ -233,7 +233,7 @@ pub fn execute_plan_with_runner(
         .iter()
         .all(|target| target.operations.is_empty())
     {
-        bail!("the install plan contains no file operations");
+        bail!("the install plan contains no operations");
     }
     let mut committed_roots = Vec::new();
     let mut created_plugins: Vec<(String, String, bool, bool)> = Vec::new();

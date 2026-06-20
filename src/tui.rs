@@ -4,7 +4,9 @@ use agentport::{
     detect_agents, execute_plan, uninstall,
 };
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -38,6 +40,7 @@ enum Screen {
 struct InstallerApp {
     screen: Screen,
     source_input: String,
+    source_cursor: usize,
     prepared: Option<PreparedSource>,
     artifacts: Vec<Artifact>,
     artifact_selected: Vec<bool>,
@@ -51,6 +54,8 @@ struct InstallerApp {
 
 impl InstallerApp {
     fn new(source: Option<String>) -> Result<Self> {
+        let source_input = source.unwrap_or_default();
+        let source_cursor = source_input.chars().count();
         let targets = detect_agents()
             .into_iter()
             .map(|agent| TargetChoice {
@@ -62,7 +67,8 @@ impl InstallerApp {
             .collect();
         let app = Self {
             screen: Screen::AgentCheck,
-            source_input: source.unwrap_or_default(),
+            source_input,
+            source_cursor,
             prepared: None,
             artifacts: Vec::new(),
             artifact_selected: Vec::new(),
@@ -89,8 +95,24 @@ impl InstallerApp {
         self.message = "Loading and scanning source…".into();
         match DefaultSourceProvider::default().prepare(self.source_input.trim()) {
             Ok(prepared) => match DefaultScanner.scan(&prepared.root) {
-                Ok(artifacts) if !artifacts.is_empty() => {
-                    self.artifact_selected = vec![true; artifacts.len()];
+                Ok(mut artifacts) if !artifacts.is_empty() => {
+                    let codex_plugins_available = self.targets.iter().any(|target| {
+                        target.kind == AgentKind::Codex
+                            && target.evidence.contains("'codex' found on PATH")
+                    });
+                    let has_standalone = artifacts
+                        .iter()
+                        .any(|artifact| artifact.codex_plugin.is_none());
+                    if has_standalone && !codex_plugins_available {
+                        artifacts.retain(|artifact| artifact.codex_plugin.is_none());
+                    }
+                    let has_standalone = artifacts
+                        .iter()
+                        .any(|artifact| artifact.codex_plugin.is_none());
+                    self.artifact_selected = artifacts
+                        .iter()
+                        .map(|artifact| !has_standalone || artifact.codex_plugin.is_none())
+                        .collect();
                     self.artifacts = artifacts;
                     self.prepared = Some(prepared);
                     self.screen = Screen::Artifacts;
@@ -98,12 +120,48 @@ impl InstallerApp {
                     self.message.clear();
                 }
                 Ok(_) => {
+                    self.screen = Screen::Source;
                     self.message = "No skills or plugin artifacts were found in this source.".into()
                 }
-                Err(error) => self.message = format!("Scan failed: {error:#}"),
+                Err(error) => {
+                    self.screen = Screen::Source;
+                    self.message = format!("Scan failed: {error:#}");
+                }
             },
-            Err(error) => self.message = format!("Source failed: {error:#}"),
+            Err(error) => {
+                self.screen = Screen::Source;
+                self.message = format!("Source failed: {error:#}");
+            }
         }
+    }
+
+    fn insert_source_text(&mut self, text: &str) {
+        let text = text.replace(['\r', '\n'], "");
+        let byte = char_byte_index(&self.source_input, self.source_cursor);
+        self.source_input.insert_str(byte, &text);
+        self.source_cursor += text.chars().count();
+        self.message.clear();
+    }
+
+    fn backspace_source(&mut self) {
+        if self.source_cursor == 0 {
+            return;
+        }
+        let start = char_byte_index(&self.source_input, self.source_cursor - 1);
+        let end = char_byte_index(&self.source_input, self.source_cursor);
+        self.source_input.replace_range(start..end, "");
+        self.source_cursor -= 1;
+        self.message.clear();
+    }
+
+    fn delete_source(&mut self) {
+        if self.source_cursor == self.source_input.chars().count() {
+            return;
+        }
+        let start = char_byte_index(&self.source_input, self.source_cursor);
+        let end = char_byte_index(&self.source_input, self.source_cursor + 1);
+        self.source_input.replace_range(start..end, "");
+        self.message.clear();
     }
 
     fn make_plans(&mut self, store: &StateStore) {
@@ -145,6 +203,25 @@ impl InstallerApp {
             self.message = "Select at least one detected agent.".into();
             return;
         }
+        if plans
+            .iter()
+            .flat_map(|plan| &plan.targets)
+            .all(|target| target.operations.is_empty())
+        {
+            let reasons = plans
+                .iter()
+                .flat_map(|plan| &plan.targets)
+                .flat_map(|target| &target.skipped)
+                .chain(plans.iter().flat_map(|plan| &plan.warnings))
+                .cloned()
+                .collect::<Vec<_>>();
+            self.message = if reasons.is_empty() {
+                "Nothing can be installed with the current artifact and target choices.".into()
+            } else {
+                format!("Nothing can be installed: {}", reasons.join("; "))
+            };
+            return;
+        }
         self.plans = plans;
         self.screen = Screen::Review;
         self.cursor = 0;
@@ -183,19 +260,35 @@ impl InstallerApp {
     }
 }
 
+fn char_byte_index(value: &str, char_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_index)
+        .map_or(value.len(), |(index, _)| index)
+}
+
 pub fn run_installer(source: Option<String>, store: &StateStore) -> Result<()> {
     ensure_terminal()?;
     let mut app = InstallerApp::new(source)?;
     with_terminal(|terminal| {
         loop {
             terminal.draw(|frame| draw_installer(frame, &app))?;
-            let Event::Key(key) = event::read()? else {
+            let input_event = event::read()?;
+            if matches!(app.screen, Screen::Source)
+                && let Event::Paste(text) = &input_event
+            {
+                app.insert_source_text(text);
+                continue;
+            }
+            let Event::Key(key) = input_event else {
                 continue;
             };
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
+            if matches!(key.code, KeyCode::Esc)
+                || (!matches!(app.screen, Screen::Source) && matches!(key.code, KeyCode::Char('q')))
+            {
                 break Ok(());
             }
             match app.screen {
@@ -206,10 +299,16 @@ pub fn run_installer(source: Option<String>, store: &StateStore) -> Result<()> {
                 }
                 Screen::Source => match key.code {
                     KeyCode::Enter => app.load_source(),
-                    KeyCode::Backspace => {
-                        app.source_input.pop();
+                    KeyCode::Left => app.source_cursor = app.source_cursor.saturating_sub(1),
+                    KeyCode::Right => {
+                        app.source_cursor =
+                            (app.source_cursor + 1).min(app.source_input.chars().count())
                     }
-                    KeyCode::Char(character) => app.source_input.push(character),
+                    KeyCode::Home => app.source_cursor = 0,
+                    KeyCode::End => app.source_cursor = app.source_input.chars().count(),
+                    KeyCode::Backspace => app.backspace_source(),
+                    KeyCode::Delete => app.delete_source(),
+                    KeyCode::Char(character) => app.insert_source_text(&character.to_string()),
                     _ => {}
                 },
                 Screen::Artifacts => match key.code {
@@ -405,6 +504,20 @@ pub fn run_uninstall(package: Option<String>, store: &StateStore) -> Result<()> 
 }
 
 fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
+    let panel_border = Style::default().fg(Color::Cyan);
+    let surface = Style::default().fg(Color::White).bg(Color::Rgb(12, 28, 38));
+    let focused = Style::default()
+        .fg(Color::White)
+        .bg(Color::Rgb(24, 52, 72))
+        .add_modifier(Modifier::BOLD);
+    let checked_style = Style::default()
+        .fg(Color::LightGreen)
+        .bg(Color::Rgb(12, 28, 38))
+        .add_modifier(Modifier::BOLD);
+    let focused_checked_style = Style::default()
+        .fg(Color::LightGreen)
+        .bg(Color::Rgb(24, 52, 72))
+        .add_modifier(Modifier::BOLD);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -423,7 +536,13 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             ),
             Span::raw("Source → Artifact → Agents → Review → Install"),
         ]))
-        .block(Block::default().borders(Borders::ALL)),
+        .style(surface)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(panel_border)
+                .style(surface),
+        ),
         chunks[0],
     );
     match app.screen {
@@ -457,25 +576,86 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             lines.push(Line::from("Press Enter when you have checked the list."));
             frame.render_widget(
                 Paragraph::new(lines)
+                    .style(surface)
                     .block(
                         Block::default()
                             .title(" Agent availability ")
-                            .borders(Borders::ALL),
+                            .borders(Borders::ALL)
+                            .border_style(panel_border)
+                            .style(surface),
                     )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
             );
         }
         Screen::Source => {
-            let text = format!(
-                "Enter a public GitHub URL, local directory, ZIP, or tar.gz:\n\n{}",
-                app.source_input
-            );
+            let source_block = Block::default()
+                .title(" Source ")
+                .borders(Borders::ALL)
+                .border_style(panel_border)
+                .style(surface);
+            let source_area = source_block.inner(chunks[1]);
+            frame.render_widget(source_block, chunks[1]);
+            let source_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(2),
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                ])
+                .split(source_area);
             frame.render_widget(
-                Paragraph::new(text)
-                    .block(Block::default().title(" Source ").borders(Borders::ALL))
-                    .wrap(Wrap { trim: false }),
-                chunks[1],
+                Paragraph::new("Paste a public GitHub URL or enter a local package path:")
+                    .style(surface),
+                source_chunks[0],
+            );
+            let input_width = source_chunks[1].width.saturating_sub(2) as usize;
+            let viewport_start = app
+                .source_cursor
+                .saturating_sub(input_width.saturating_sub(1));
+            let before_cursor = app
+                .source_input
+                .chars()
+                .skip(viewport_start)
+                .take(app.source_cursor.saturating_sub(viewport_start))
+                .collect::<String>();
+            let cursor_character = app
+                .source_input
+                .chars()
+                .nth(app.source_cursor)
+                .unwrap_or(' ')
+                .to_string();
+            let after_cursor = app
+                .source_input
+                .chars()
+                .skip(app.source_cursor.saturating_add(1))
+                .take(
+                    input_width
+                        .saturating_sub(app.source_cursor.saturating_sub(viewport_start) + 1),
+                )
+                .collect::<String>();
+            let input_style = Style::default().fg(Color::White).bg(Color::Rgb(24, 52, 72));
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(before_cursor),
+                    Span::styled(
+                        cursor_character,
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(after_cursor),
+                ]))
+                .style(input_style)
+                .block(
+                    Block::default()
+                        .title(" URL or path ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan))
+                        .style(input_style),
+                ),
+                source_chunks[1],
             );
         }
         Screen::Artifacts => {
@@ -490,15 +670,28 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
                     } else {
                         " "
                     };
+                    let style = match (index == app.cursor, app.artifact_selected[index]) {
+                        (true, true) => focused_checked_style,
+                        (true, false) => focused,
+                        (false, true) => checked_style,
+                        (false, false) => surface,
+                    };
                     ListItem::new(format!(
                         "{cursor} [{checked}] {} — {}",
                         artifact.name,
                         artifact.summary()
                     ))
+                    .style(style)
                 })
                 .collect::<Vec<_>>();
             frame.render_widget(
-                List::new(items).block(Block::default().title(" Artifacts ").borders(Borders::ALL)),
+                List::new(items).style(surface).block(
+                    Block::default()
+                        .title(" Select artifacts ")
+                        .borders(Borders::ALL)
+                        .border_style(panel_border)
+                        .style(surface),
+                ),
                 chunks[1],
             );
         }
@@ -512,24 +705,45 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             for (index, target) in app.targets.iter().enumerate() {
                 let cursor = if index == app.cursor { ">" } else { " " };
                 let checked = if target.selected { "x" } else { " " };
-                lines.push(Line::from(format!(
-                    "{cursor} [{checked}] {:<15} {:<7}  {}",
-                    target.kind.label(),
-                    target.scope.label(),
-                    target.evidence
-                )));
+                lines.push(Line::styled(
+                    format!(
+                        "{cursor} [{checked}] {:<15} {:<7}  {}",
+                        target.kind.label(),
+                        target.scope.label(),
+                        target.evidence
+                    ),
+                    match (index == app.cursor, target.selected) {
+                        (true, true) => focused_checked_style,
+                        (true, false) => focused,
+                        (false, true) => checked_style,
+                        (false, false) => surface,
+                    },
+                ));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(format!(
-                "[{}] Approve active hooks/scripts/MCP commands",
-                if app.approve_active { "x" } else { " " }
-            )));
+            lines.push(Line::styled(
+                format!(
+                    "[{}] Approve active hooks/scripts/MCP commands  (x toggles)",
+                    if app.approve_active { "x" } else { " " }
+                ),
+                if app.approve_active {
+                    Style::default()
+                        .fg(Color::LightGreen)
+                        .bg(Color::Rgb(24, 52, 72))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    surface
+                },
+            ));
             frame.render_widget(
                 Paragraph::new(lines)
+                    .style(surface)
                     .block(
                         Block::default()
                             .title(" Agent compatibility and scope ")
-                            .borders(Borders::ALL),
+                            .borders(Borders::ALL)
+                            .border_style(panel_border)
+                            .style(surface),
                     )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
@@ -561,10 +775,13 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             }
             frame.render_widget(
                 Paragraph::new(lines)
+                    .style(surface)
                     .block(
                         Block::default()
                             .title(" Review exact changes ")
-                            .borders(Borders::ALL),
+                            .borders(Borders::ALL)
+                            .border_style(panel_border)
+                            .style(surface),
                     )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
@@ -573,7 +790,14 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
         Screen::Result => {
             frame.render_widget(
                 Paragraph::new(app.message.clone())
-                    .block(Block::default().title(" Result ").borders(Borders::ALL))
+                    .style(surface)
+                    .block(
+                        Block::default()
+                            .title(" Result ")
+                            .borders(Borders::ALL)
+                            .border_style(panel_border)
+                            .style(surface),
+                    )
                     .wrap(Wrap { trim: false }),
                 chunks[1],
             );
@@ -581,7 +805,7 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
     }
     let help = match app.screen {
         Screen::AgentCheck => "Enter continue  •  Esc quit",
-        Screen::Source => "Enter load  •  Esc quit",
+        Screen::Source => "Type or paste  •  ←→ move  •  Backspace/Delete edit  •  Enter load",
         Screen::Artifacts => "↑↓ move  •  Space toggle  •  a all  •  Enter next  •  Backspace back",
         Screen::Targets => {
             "↑↓ move  •  Space toggle  •  g global  •  p project  •  x active content  •  Enter next"
@@ -596,7 +820,13 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
     };
     frame.render_widget(
         Paragraph::new(footer)
-            .block(Block::default().borders(Borders::ALL))
+            .style(surface)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(panel_border)
+                    .style(surface),
+            )
             .wrap(Wrap { trim: true }),
         chunks[2],
     );
@@ -607,12 +837,17 @@ fn with_terminal<T>(
 ) -> Result<T> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
     let result = run(&mut terminal);
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -632,5 +867,33 @@ fn centered(area: ratatui::layout::Rect, width: u16, height: u16) -> ratatui::la
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_input_supports_insertion_and_deletion_at_cursor() {
+        let mut app = InstallerApp::new(Some("ab界d".into())).unwrap();
+        app.source_cursor = 2;
+        app.insert_source_text("c");
+        assert_eq!(app.source_input, "abc界d");
+        assert_eq!(app.source_cursor, 3);
+
+        app.delete_source();
+        assert_eq!(app.source_input, "abcd");
+        app.backspace_source();
+        assert_eq!(app.source_input, "abd");
+        assert_eq!(app.source_cursor, 2);
+    }
+
+    #[test]
+    fn pasted_source_discards_line_endings() {
+        let mut app = InstallerApp::new(None).unwrap();
+        app.insert_source_text("https://example.test/repo\r\n");
+        assert_eq!(app.source_input, "https://example.test/repo");
+        assert_eq!(app.source_cursor, app.source_input.chars().count());
     }
 }

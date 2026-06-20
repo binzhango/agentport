@@ -4,6 +4,29 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-20
+
+### Added
+
+- An all-in-one Podman test image with Agentport, Codex CLI, Node.js, and Git.
+- A focused Podman TUI testing guide.
+- Editable source input with paste, cursor movement, deletion, and horizontal scrolling.
+
+### Changed
+
+- Codex plugin repositories expose bundled skills as independently selectable artifacts.
+- Standalone skills are selected by default while optional plugins remain opt-in.
+- TUI panels, focused rows, checked choices, and the source cursor have clearer styling.
+- Crates.io and docs.rs documentation now includes a richer overview, compatibility matrix,
+  quick start, safety model, and installation-management guidance.
+
+### Fixed
+
+- Container builds now include the README required by the crate's embedded documentation.
+- Empty installation plans are blocked before execution with actionable skipped reasons.
+- Plugin choices are hidden when the Codex CLI is unavailable but standalone skills can
+  still be installed.
+
 ## [0.1.0] - 2026-06-19
 
 ### Added
@@ -14,5 +37,6 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 - Transactional file writes, managed installation records, and hash-safe uninstall.
 - Active-content review for scripts, hooks, and MCP definitions.
 
-[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/binzhango/agentport/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/binzhango/agentport/releases/tag/v0.1.0
