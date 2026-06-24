@@ -4,6 +4,17 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- A `-g` / `--global` flag to default the installer to global agent-specific skill
+  directories.
+
+### Changed
+
+- Project-scope skill installs are now the default and use the shared
+  `.agents/skills` Agent Skills convention at the Git repository root.
+- Project-scope installs outside a Git repository now require explicit confirmation.
+
 ## [0.1.1] - 2026-06-20
 
 ### Added

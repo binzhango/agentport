@@ -37,6 +37,7 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
         .collect();
     let mut warnings = Vec::new();
     let mut targets = Vec::new();
+    let mut planned_destinations = HashSet::new();
 
     for (agent, scope) in &request.targets {
         let adapter = NativeAdapter(*agent);
@@ -142,6 +143,18 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
                 ));
                 continue;
             };
+            let shared_project_skill = *scope == InstallScope::Project
+                && matches!(
+                    component.kind,
+                    crate::model::ComponentKind::Skill | crate::model::ComponentKind::Command
+                );
+            if shared_project_skill && planned_destinations.contains(&destination) {
+                skipped.push(format!(
+                    "{} ({:?}): shared project install already planned",
+                    component.name, component.kind
+                ));
+                continue;
+            }
             if destination.exists() && !managed.contains(&destination) {
                 bail!(
                     "refusing to overwrite unmanaged path {}",
@@ -154,6 +167,7 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
                     destination.display()
                 );
             }
+            let planned_destination = destination.clone();
             let operation = if component.source.is_dir() {
                 PlannedOperation::CopyDirectory {
                     from: component.source.clone(),
@@ -170,6 +184,7 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
                     to: destination,
                 }
             };
+            planned_destinations.insert(planned_destination);
             operations.push(operation);
         }
         if operations.is_empty() {
@@ -891,6 +906,51 @@ mod tests {
         assert_eq!(report.removed.len(), 2);
         assert!(!destination.exists());
         assert!(state.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_skill_selected_for_multiple_agents_is_planned_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill = temp.path().join("source/demo");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "demo").unwrap();
+        let state = StateStore::new(temp.path().join("state"));
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "demo".into(),
+                name: "demo".into(),
+                root: skill.clone(),
+                components: vec![Component {
+                    name: "demo".into(),
+                    kind: ComponentKind::Skill,
+                    source: skill,
+                    active: false,
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![
+                (AgentKind::Codex, InstallScope::Project),
+                (AgentKind::Claude, InstallScope::Project),
+                (AgentKind::Copilot, InstallScope::Project),
+            ],
+            project: project.clone(),
+            approve_active: false,
+        };
+        let plan = build_plan(&request, &state).unwrap();
+        let operations = plan
+            .targets
+            .iter()
+            .flat_map(|target| &target.operations)
+            .collect::<Vec<_>>();
+        assert_eq!(operations.len(), 1);
+        assert!(matches!(
+            operations[0],
+            PlannedOperation::CopyDirectory { to, .. }
+                if to == &project.join(".agents/skills/demo")
+        ));
     }
 
     #[test]

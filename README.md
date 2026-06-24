@@ -20,8 +20,8 @@ destination. Agentport provides one reviewable workflow:
 - Discover skills, command-style skills, agent definitions, hooks, and Codex
   plugins from a package.
 - Select individual artifacts instead of installing everything blindly.
-- Install globally or into the current project using each agent's native
-  directory layout.
+- Install into the current repository by default using the open `.agents/skills`
+  convention, or globally with `-g` / `--global`.
 - Keep Codex plugin bundles intact and install them through the Codex CLI.
 - Require explicit approval before installing hooks, scripts, or MCP content.
 - Record hashes so uninstall removes unchanged files and preserves local edits.
@@ -53,6 +53,16 @@ agentport ~/Downloads/skills.zip
 agentport ~/Downloads/skills.tar.gz
 ```
 
+By default, selected skills install into the current Git repository's
+`.agents/skills` directory so any Agent Skills-compatible client can discover
+them. Use `-g` or `--global` to default the installer to global agent-specific
+skill directories:
+
+```sh
+agentport -g ./my-skill
+agentport --global https://github.com/DietrichGebert/ponytail
+```
+
 The installer then walks through five reviewable steps:
 
 1. Select discovered artifacts.
@@ -63,7 +73,8 @@ The installer then walks through five reviewable steps:
 
 Agentport is interactive and requires a TTY. GitHub URLs must point to public
 repositories; clone private repositories first and install from the local
-checkout.
+checkout. If the current directory is not inside a Git repository, project-scope
+installs require explicit confirmation before writing to the current directory.
 
 ## What gets installed?
 
@@ -84,10 +95,13 @@ MCP servers bundled in a Codex plugin remain part of that native plugin.
 | Agent | Global | Project |
 | --- | --- | --- |
 | Codex | `~/.codex/skills` | `.agents/skills` |
-| Claude Code | `~/.claude/skills` | `.claude/skills` |
-| GitHub Copilot | `~/.copilot/skills` | `.github/skills` |
+| Claude Code | `~/.claude/skills` | `.agents/skills` |
+| GitHub Copilot | `~/.copilot/skills` | `.agents/skills` |
 
-`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `COPILOT_HOME` are honored.
+Project skill installs are rooted at the current Git repository root. The
+`.agents/skills` path follows the open Agent Skills convention for cross-client
+reuse. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `COPILOT_HOME` are honored for
+global installs.
 
 ### Codex plugin behavior
 
