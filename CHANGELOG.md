@@ -4,6 +4,8 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-24
+
 ### Added
 
 - A `-g` / `--global` flag to default the installer to global agent-specific skill
@@ -52,6 +54,7 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 - Transactional file writes, managed installation records, and hash-safe uninstall.
 - Active-content review for scripts, hooks, and MCP definitions.
 
-[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/binzhango/agentport/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/binzhango/agentport/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/binzhango/agentport/releases/tag/v0.1.0
