@@ -2,11 +2,13 @@ name: Publish to crates.io
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: crates-io-${{ github.ref_name }}
@@ -26,26 +28,98 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify tag matches crate version
+      - name: Read crate metadata
+        id: crate
         shell: bash
         run: |
-          # Cargo 1.88 prints path package IDs ending in `#0.1.0`, while
-          # newer Cargo versions may include `@0.1.0`.
-          crate_version="$(cargo pkgid | sed -E 's/.*[#@]//')"
+          # Cargo 1.88 prints path package IDs ending in `#agentport@0.1.0`.
+          pkgid="$(cargo pkgid)"
+          crate_name="$(printf '%s\n' "$pkgid" | sed -E 's/.*#([^@]+)@.*/\1/')"
+          crate_version="$(printf '%s\n' "$pkgid" | sed -E 's/.*@//')"
+          echo "name=${crate_name}" >> "$GITHUB_OUTPUT"
+          echo "version=${crate_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
           tag_version="${GITHUB_REF_NAME#v}"
-          if [[ "$crate_version" != "$tag_version" ]]; then
-            echo "Tag version $tag_version does not match Cargo.toml version $crate_version" >&2
+          if [[ "${{ steps.crate.outputs.version }}" != "$tag_version" ]]; then
+            echo "Tag version $tag_version does not match Cargo.toml version ${{ steps.crate.outputs.version }}" >&2
+            exit 1
+          fi
+
+      - name: Check crates.io version
+        id: registry
+        shell: bash
+        run: |
+          status="$(
+            curl \
+              --silent \
+              --show-error \
+              --output /tmp/crate-version.json \
+              --write-out '%{http_code}' \
+              --header 'User-Agent: agentport-release-workflow' \
+              "https://crates.io/api/v1/crates/${{ steps.crate.outputs.name }}/${{ steps.crate.outputs.version }}"
+          )"
+          case "$status" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "${{ steps.crate.outputs.name }} ${{ steps.crate.outputs.version }} is already published; skipping publish."
+              ;;
+            404)
+              echo "published=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              cat /tmp/crate-version.json >&2 || true
+              echo "Unexpected crates.io response: $status" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Extract release notes
+        if: steps.registry.outputs.published == 'false'
+        shell: bash
+        run: |
+          version="${{ steps.crate.outputs.version }}"
+          awk -v version="$version" '
+            index($0, "## [" version "]") == 1 {
+              found = 1
+              next
+            }
+            found && index($0, "## [") == 1 {
+              exit
+            }
+            found {
+              print
+            }
+          ' CHANGELOG.md | sed '/^[[:space:]]*$/d' > /tmp/release-notes.md
+          if [[ ! -s /tmp/release-notes.md ]]; then
+            echo "CHANGELOG.md must contain a non-empty section for version $version" >&2
             exit 1
           fi
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features --locked
-      - run: cargo publish --dry-run --locked
+      - if: steps.registry.outputs.published == 'false'
+        run: cargo publish --dry-run --locked
 
       - name: Publish crate
+        if: steps.registry.outputs.published == 'false'
         # The preceding dry run verified the same checkout. Avoid rebuilding while
         # the registry token is present in this step's environment.
         run: cargo publish --locked --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub release
+        if: steps.registry.outputs.published == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.crate.outputs.version }}"
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.crate.outputs.name }} ${{ steps.crate.outputs.version }}" \
+            --notes-file /tmp/release-notes.md
