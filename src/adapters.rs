@@ -55,7 +55,7 @@ impl AgentAdapter for NativeAdapter {
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("skills"),
             (
-                AgentKind::Codex,
+                AgentKind::Codex | AgentKind::Claude | AgentKind::Copilot,
                 InstallScope::Project,
                 ComponentKind::Skill | ComponentKind::Command,
             ) => project.join(".agents/skills"),
@@ -67,22 +67,12 @@ impl AgentAdapter for NativeAdapter {
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("skills"),
             (
-                AgentKind::Claude,
-                InstallScope::Project,
-                ComponentKind::Skill | ComponentKind::Command,
-            ) => project.join(".claude/skills"),
-            (
                 AgentKind::Copilot,
                 InstallScope::Global,
                 ComponentKind::Skill | ComponentKind::Command,
             ) => env_path("COPILOT_HOME")
                 .unwrap_or_else(|| home.join(".copilot"))
                 .join("skills"),
-            (
-                AgentKind::Copilot,
-                InstallScope::Project,
-                ComponentKind::Skill | ComponentKind::Command,
-            ) => project.join(".github/skills"),
             (AgentKind::Claude, InstallScope::Global, ComponentKind::Agent) => {
                 env_path("CLAUDE_CONFIG_DIR")
                     .unwrap_or_else(|| home.join(".claude"))
@@ -218,7 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_skill_destinations_are_target_specific() {
+    fn project_skill_destinations_use_shared_agents_directory() {
         let project = Path::new("/work");
         let component = Component {
             name: "demo".into(),
@@ -236,13 +226,13 @@ mod tests {
             NativeAdapter(AgentKind::Claude)
                 .destination(&component, InstallScope::Project, project)
                 .unwrap(),
-            PathBuf::from("/work/.claude/skills/demo")
+            PathBuf::from("/work/.agents/skills/demo")
         );
         assert_eq!(
             NativeAdapter(AgentKind::Copilot)
                 .destination(&component, InstallScope::Project, project)
                 .unwrap(),
-            PathBuf::from("/work/.github/skills/demo")
+            PathBuf::from("/work/.agents/skills/demo")
         );
     }
 }

@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Clone)]
 struct TargetChoice {
@@ -33,6 +34,7 @@ enum Screen {
     Source,
     Artifacts,
     Targets,
+    ProjectApproval,
     Review,
     Result,
 }
@@ -50,18 +52,26 @@ struct InstallerApp {
     plans: Vec<InstallPlan>,
     message: String,
     project: PathBuf,
+    project_is_git: bool,
+    non_git_project_approved: bool,
 }
 
 impl InstallerApp {
-    fn new(source: Option<String>) -> Result<Self> {
+    fn new(source: Option<String>, global: bool) -> Result<Self> {
         let source_input = source.unwrap_or_default();
         let source_cursor = source_input.chars().count();
+        let default_scope = if global {
+            InstallScope::Global
+        } else {
+            InstallScope::Project
+        };
+        let (project, project_is_git) = project_root()?;
         let targets = detect_agents()
             .into_iter()
             .map(|agent| TargetChoice {
                 kind: agent.kind,
                 selected: true,
-                scope: InstallScope::Global,
+                scope: default_scope,
                 evidence: agent.evidence.join(", "),
             })
             .collect();
@@ -77,7 +87,9 @@ impl InstallerApp {
             approve_active: false,
             plans: Vec::new(),
             message: String::new(),
-            project: std::env::current_dir().context("determine current project directory")?,
+            project,
+            project_is_git,
+            non_git_project_approved: false,
         };
         Ok(app)
     }
@@ -174,6 +186,21 @@ impl InstallerApp {
             .filter(|target| target.selected)
             .map(|target| (target.kind, target.scope))
             .collect();
+        if targets.is_empty() {
+            self.message = "Select at least one detected agent.".into();
+            return;
+        }
+        if targets
+            .iter()
+            .any(|(_, scope)| *scope == InstallScope::Project)
+            && !self.project_is_git
+            && !self.non_git_project_approved
+        {
+            self.screen = Screen::ProjectApproval;
+            self.cursor = 0;
+            self.message.clear();
+            return;
+        }
         let mut plans = Vec::new();
         for (index, artifact) in self.artifacts.iter().enumerate() {
             if !self.artifact_selected[index] {
@@ -197,10 +224,6 @@ impl InstallerApp {
         }
         if plans.is_empty() {
             self.message = "Select at least one artifact.".into();
-            return;
-        }
-        if targets.is_empty() {
-            self.message = "Select at least one detected agent.".into();
             return;
         }
         if plans
@@ -260,6 +283,27 @@ impl InstallerApp {
     }
 }
 
+fn project_root() -> Result<(PathBuf, bool)> {
+    let current = std::env::current_dir().context("determine current project directory")?;
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(&current)
+        .output();
+    let Ok(output) = output else {
+        return Ok((current, false));
+    };
+    if !output.status.success() {
+        return Ok((current, false));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let root = stdout.trim();
+    if root.is_empty() {
+        Ok((current, false))
+    } else {
+        Ok((PathBuf::from(root), true))
+    }
+}
+
 fn char_byte_index(value: &str, char_index: usize) -> usize {
     value
         .char_indices()
@@ -267,9 +311,9 @@ fn char_byte_index(value: &str, char_index: usize) -> usize {
         .map_or(value.len(), |(index, _)| index)
 }
 
-pub fn run_installer(source: Option<String>, store: &StateStore) -> Result<()> {
+pub fn run_installer(source: Option<String>, global: bool, store: &StateStore) -> Result<()> {
     ensure_terminal()?;
-    let mut app = InstallerApp::new(source)?;
+    let mut app = InstallerApp::new(source, global)?;
     with_terminal(|terminal| {
         loop {
             terminal.draw(|frame| draw_installer(frame, &app))?;
@@ -286,7 +330,7 @@ pub fn run_installer(source: Option<String>, store: &StateStore) -> Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if matches!(key.code, KeyCode::Esc)
+            if (matches!(key.code, KeyCode::Esc) && !matches!(app.screen, Screen::ProjectApproval))
                 || (!matches!(app.screen, Screen::Source) && matches!(key.code, KeyCode::Char('q')))
             {
                 break Ok(());
@@ -378,6 +422,17 @@ pub fn run_installer(source: Option<String>, store: &StateStore) -> Result<()> {
                     KeyCode::Enter => app.make_plans(store),
                     KeyCode::Backspace => {
                         app.screen = Screen::Artifacts;
+                        app.cursor = 0;
+                    }
+                    _ => {}
+                },
+                Screen::ProjectApproval => match key.code {
+                    KeyCode::Char('y') => {
+                        app.non_git_project_approved = true;
+                        app.make_plans(store);
+                    }
+                    KeyCode::Char('n') | KeyCode::Backspace | KeyCode::Esc => {
+                        app.screen = Screen::Targets;
                         app.cursor = 0;
                     }
                     _ => {}
@@ -749,6 +804,31 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
                 chunks[1],
             );
         }
+        Screen::ProjectApproval => {
+            let lines = vec![
+                Line::from("The current directory is not inside a Git repository."),
+                Line::from(""),
+                Line::from(format!(
+                    "Project-scope skills will be installed into {}",
+                    app.project.join(".agents/skills").display()
+                )),
+                Line::from(""),
+                Line::from("Press y to approve this local install, or n to go back."),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .style(surface)
+                    .block(
+                        Block::default()
+                            .title(" Confirm non-repository install ")
+                            .borders(Borders::ALL)
+                            .border_style(panel_border)
+                            .style(surface),
+                    )
+                    .wrap(Wrap { trim: false }),
+                chunks[1],
+            );
+        }
         Screen::Review => {
             let mut lines = Vec::new();
             for plan in &app.plans {
@@ -810,6 +890,7 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
         Screen::Targets => {
             "↑↓ move  •  Space toggle  •  g global  •  p project  •  x active content  •  Enter next"
         }
+        Screen::ProjectApproval => "y approve  •  n/backspace return",
         Screen::Review => "Enter install  •  Backspace back  •  Esc quit",
         Screen::Result => "Enter close",
     };
@@ -876,7 +957,7 @@ mod tests {
 
     #[test]
     fn source_input_supports_insertion_and_deletion_at_cursor() {
-        let mut app = InstallerApp::new(Some("ab界d".into())).unwrap();
+        let mut app = InstallerApp::new(Some("ab界d".into()), false).unwrap();
         app.source_cursor = 2;
         app.insert_source_text("c");
         assert_eq!(app.source_input, "abc界d");
@@ -891,9 +972,28 @@ mod tests {
 
     #[test]
     fn pasted_source_discards_line_endings() {
-        let mut app = InstallerApp::new(None).unwrap();
+        let mut app = InstallerApp::new(None, false).unwrap();
         app.insert_source_text("https://example.test/repo\r\n");
         assert_eq!(app.source_input, "https://example.test/repo");
         assert_eq!(app.source_cursor, app.source_input.chars().count());
+    }
+
+    #[test]
+    fn global_flag_controls_initial_scope() {
+        let local = InstallerApp::new(None, false).unwrap();
+        assert!(
+            local
+                .targets
+                .iter()
+                .all(|target| target.scope == InstallScope::Project)
+        );
+
+        let global = InstallerApp::new(None, true).unwrap();
+        assert!(
+            global
+                .targets
+                .iter()
+                .all(|target| target.scope == InstallScope::Global)
+        );
     }
 }

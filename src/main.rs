@@ -11,6 +11,10 @@ use clap::{Parser, Subcommand};
     about = "Install agent skills and plugins across AI coding agents"
 )]
 struct Cli {
+    /// Install into global agent-specific skill directories.
+    #[arg(short = 'g', long = "global")]
+    global: bool,
+
     /// GitHub URL, local directory, ZIP, or tar.gz to install.
     source: Option<String>,
 
@@ -51,6 +55,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Some(Command::Uninstall { package }) => tui::run_uninstall(package, &store),
-        None => tui::run_installer(cli.source, &store),
+        None => tui::run_installer(cli.source, cli.global, &store),
     }
 }
