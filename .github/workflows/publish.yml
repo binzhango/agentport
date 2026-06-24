@@ -32,10 +32,9 @@ jobs:
         id: crate
         shell: bash
         run: |
-          # Cargo 1.88 prints path package IDs ending in `#agentport@0.1.0`.
-          pkgid="$(cargo pkgid)"
-          crate_name="$(printf '%s\n' "$pkgid" | sed -E 's/.*#([^@]+)@.*/\1/')"
-          crate_version="$(printf '%s\n' "$pkgid" | sed -E 's/.*@//')"
+          metadata="$(cargo metadata --no-deps --format-version 1)"
+          crate_name="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["name"])' <<< "$metadata")"
+          crate_version="$(python3 -c 'import json, sys; print(json.load(sys.stdin)["packages"][0]["version"])' <<< "$metadata")"
           echo "name=${crate_name}" >> "$GITHUB_OUTPUT"
           echo "version=${crate_version}" >> "$GITHUB_OUTPUT"
 
