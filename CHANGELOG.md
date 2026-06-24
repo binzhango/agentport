@@ -16,6 +16,8 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 - Project-scope installs outside a Git repository now require explicit confirmation.
 - crates.io publishing now runs automatically from GitHub Actions when a new
   crate version reaches `main`.
+- Successful new crate publishes now create a GitHub Release populated from the
+  matching `CHANGELOG.md` version section.
 
 ## [0.1.1] - 2026-06-20
 

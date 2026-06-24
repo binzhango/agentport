@@ -14,7 +14,7 @@ tags for explicit release events.
 ## Release checklist
 
 1. Update `version` in `Cargo.toml` and run `cargo update -w` if the lockfile needs refreshing.
-2. Move entries from `Unreleased` into a dated version in `CHANGELOG.md` and update its comparison links.
+2. Move entries from `Unreleased` into a dated version in `CHANGELOG.md` and update its comparison links. The publish workflow uses this version section as the GitHub Release notes.
 3. Run:
 
    ```sh
@@ -34,5 +34,6 @@ tags for explicit release events.
    ```
 
 The publish workflow verifies that any pushed tag matches `Cargo.toml`, reruns
-release checks, and skips publishing when the crate version already exists.
-crates.io versions are permanent and cannot be overwritten.
+release checks, publishes new crate versions, and creates a GitHub Release from
+the matching `CHANGELOG.md` section. It skips publishing when the crate version
+already exists. crates.io versions are permanent and cannot be overwritten.
