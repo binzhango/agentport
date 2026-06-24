@@ -1,6 +1,8 @@
 # Releasing Agentport
 
-Releases are published to crates.io from GitHub Actions when a `v<version>` tag is pushed.
+Releases are published to crates.io from GitHub Actions when a new crate
+version reaches `main`. The same publish workflow also supports `v<version>`
+tags for explicit release events.
 
 ## One-time repository setup
 
@@ -22,12 +24,15 @@ Releases are published to crates.io from GitHub Actions when a `v<version>` tag 
    cargo publish --dry-run --locked
    ```
 
-4. Commit the release changes and push them to `main`.
-5. Create and push the matching annotated tag:
+4. Commit the release changes and push them to `main`. The publish workflow
+   will publish the crate if that exact version is not already on crates.io.
+5. Optionally create and push the matching annotated tag:
 
    ```sh
    git tag -a v0.1.0 -m "Agentport 0.1.0"
    git push origin v0.1.0
    ```
 
-The publish workflow verifies that the tag matches `Cargo.toml`, reruns release checks, and publishes exactly once. crates.io versions are permanent and cannot be overwritten.
+The publish workflow verifies that any pushed tag matches `Cargo.toml`, reruns
+release checks, and skips publishing when the crate version already exists.
+crates.io versions are permanent and cannot be overwritten.
