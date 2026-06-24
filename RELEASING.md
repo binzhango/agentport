@@ -35,5 +35,7 @@ tags for explicit release events.
 
 The publish workflow verifies that any pushed tag matches `Cargo.toml`, reruns
 release checks, publishes new crate versions, and creates a GitHub Release from
-the matching `CHANGELOG.md` section. It skips publishing when the crate version
-already exists. crates.io versions are permanent and cannot be overwritten.
+the matching `CHANGELOG.md` section. When a matching tag is pushed, the workflow
+also updates an existing release with those notes if one already exists. It
+skips publishing when the crate version already exists. crates.io versions are
+permanent and cannot be overwritten.
