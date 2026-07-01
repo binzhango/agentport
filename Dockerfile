@@ -15,14 +15,25 @@ RUN apt-get update \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
     && useradd --create-home tester \
-    && mkdir -p /home/tester/.codex /workspace /input \
+    && mkdir -p \
+        /home/tester/.claude \
+        /home/tester/.codex \
+        /home/tester/.copilot \
+        /home/tester/.cursor \
+        /home/tester/.gemini \
+        /workspace \
+        /input \
     && chown -R tester:tester /home/tester /workspace
 
 COPY --from=builder /src/target/release/agentport /usr/local/bin/agentport
 
 USER tester
 ENV HOME=/home/tester
+ENV CLAUDE_CONFIG_DIR=/home/tester/.claude
 ENV CODEX_HOME=/home/tester/.codex
+ENV COPILOT_HOME=/home/tester/.copilot
+ENV CURSOR_HOME=/home/tester/.cursor
+ENV GEMINI_HOME=/home/tester/.gemini
 ENV XDG_DATA_HOME=/home/tester/.local/share
 
 WORKDIR /workspace

@@ -1,7 +1,7 @@
 use agentport::{
-    AgentKind, Artifact, ArtifactScanner, DefaultScanner, DefaultSourceProvider, InstallPlan,
-    InstallRequest, InstallScope, PreparedSource, SourceProvider, StateStore, build_plan,
-    detect_agents, execute_plan, uninstall,
+    AgentFormat, AgentKind, Artifact, ArtifactScanner, ComponentKind, DefaultScanner,
+    DefaultSourceProvider, InstallPlan, InstallRequest, InstallScope, PreparedSource,
+    SourceProvider, StateStore, build_plan, detect_agents, execute_plan, uninstall,
 };
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -123,7 +123,13 @@ impl InstallerApp {
                         .any(|artifact| artifact.codex_plugin.is_none());
                     self.artifact_selected = artifacts
                         .iter()
-                        .map(|artifact| !has_standalone || artifact.codex_plugin.is_none())
+                        .map(|artifact| {
+                            default_artifact_selected(
+                                artifact,
+                                !has_standalone || artifact.codex_plugin.is_none(),
+                                &self.targets,
+                            )
+                        })
                         .collect();
                     self.artifacts = artifacts;
                     self.prepared = Some(prepared);
@@ -311,6 +317,74 @@ fn char_byte_index(value: &str, char_index: usize) -> usize {
         .map_or(value.len(), |(index, _)| index)
 }
 
+fn artifact_agent_format(artifact: &Artifact) -> Option<AgentFormat> {
+    if artifact.components.len() != 1 {
+        return None;
+    }
+    let component = artifact.components.first()?;
+    (component.kind == ComponentKind::Agent)
+        .then_some(component.agent_format)
+        .flatten()
+}
+
+fn has_markdown_agent_target(targets: &[TargetChoice]) -> bool {
+    targets.iter().any(|target| {
+        matches!(
+            target.kind,
+            AgentKind::Codex
+                | AgentKind::Claude
+                | AgentKind::Cursor
+                | AgentKind::Gemini
+                | AgentKind::Copilot
+        )
+    })
+}
+
+fn default_artifact_selected(
+    artifact: &Artifact,
+    normal_default: bool,
+    targets: &[TargetChoice],
+) -> bool {
+    match artifact_agent_format(artifact) {
+        Some(AgentFormat::CodexToml) => {
+            targets.iter().any(|target| target.kind == AgentKind::Codex)
+        }
+        Some(AgentFormat::Markdown | AgentFormat::Harness) => has_markdown_agent_target(targets),
+        None => normal_default,
+    }
+}
+
+fn artifact_screen_title(app: &InstallerApp) -> &'static str {
+    if !app.artifacts.is_empty()
+        && app
+            .artifacts
+            .iter()
+            .all(|artifact| artifact_agent_format(artifact).is_some())
+    {
+        " Select subagents "
+    } else {
+        " Select artifacts "
+    }
+}
+
+fn duplicate_artifact_name(app: &InstallerApp, name: &str) -> bool {
+    app.artifacts
+        .iter()
+        .filter(|artifact| artifact.name == name)
+        .take(2)
+        .count()
+        > 1
+}
+
+fn artifact_row_label(app: &InstallerApp, artifact: &Artifact) -> String {
+    let suffix = if duplicate_artifact_name(app, &artifact.name) {
+        format!("  {}", artifact.root.display())
+    } else {
+        String::new()
+    };
+    format!("{} — {}{}", artifact.name, artifact.summary(), suffix)
+}
+
 pub fn run_installer(source: Option<String>, global: bool, store: &StateStore) -> Result<()> {
     ensure_terminal()?;
     let mut app = InstallerApp::new(source, global)?;
@@ -408,7 +482,7 @@ pub fn run_installer(source: Option<String>, global: bool, store: &StateStore) -
                                     app.artifact_selected[index]
                                         && (artifact.codex_plugin.is_some()
                                             || artifact.components.iter().any(|component| {
-                                                component.kind == agentport::ComponentKind::Hook
+                                                component.kind == ComponentKind::Hook
                                             }))
                                 });
                             if requires_global {
@@ -732,9 +806,8 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
                         (false, false) => surface,
                     };
                     ListItem::new(format!(
-                        "{cursor} [{checked}] {} — {}",
-                        artifact.name,
-                        artifact.summary()
+                        "{cursor} [{checked}] {}",
+                        artifact_row_label(app, artifact)
                     ))
                     .style(style)
                 })
@@ -742,7 +815,7 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             frame.render_widget(
                 List::new(items).style(surface).block(
                     Block::default()
-                        .title(" Select artifacts ")
+                        .title(artifact_screen_title(app))
                         .borders(Borders::ALL)
                         .border_style(panel_border)
                         .style(surface),
@@ -754,7 +827,7 @@ fn draw_installer(frame: &mut ratatui::Frame<'_>, app: &InstallerApp) {
             let mut lines = Vec::new();
             if app.targets.is_empty() {
                 lines.push(Line::from(
-                    "No Codex, Claude Code, or Copilot installation was detected.",
+                    "No Codex, Claude Code, Cursor, Gemini CLI, or Copilot installation was detected.",
                 ));
             }
             for (index, target) in app.targets.iter().enumerate() {
@@ -995,5 +1068,54 @@ mod tests {
                 .iter()
                 .all(|target| target.scope == InstallScope::Global)
         );
+    }
+
+    #[test]
+    fn subagent_defaults_select_only_compatible_detected_targets() {
+        let markdown = Artifact {
+            id: "planner".into(),
+            name: "planner".into(),
+            root: PathBuf::from("planner.md"),
+            components: vec![agent_component("planner", AgentFormat::Markdown)],
+            codex_plugin: None,
+        };
+        let toml = Artifact {
+            id: "harness".into(),
+            name: "harness".into(),
+            root: PathBuf::from("harness.toml"),
+            components: vec![agent_component("harness", AgentFormat::CodexToml)],
+            codex_plugin: None,
+        };
+        let markdown_targets = vec![TargetChoice {
+            kind: AgentKind::Cursor,
+            selected: true,
+            scope: InstallScope::Project,
+            evidence: "test".into(),
+        }];
+        let codex_targets = vec![TargetChoice {
+            kind: AgentKind::Codex,
+            selected: true,
+            scope: InstallScope::Project,
+            evidence: "test".into(),
+        }];
+
+        assert!(default_artifact_selected(
+            &markdown,
+            false,
+            &markdown_targets
+        ));
+        assert!(!default_artifact_selected(&toml, false, &markdown_targets));
+        assert!(default_artifact_selected(&toml, false, &codex_targets));
+        assert!(default_artifact_selected(&markdown, false, &codex_targets));
+    }
+
+    fn agent_component(name: &str, format: AgentFormat) -> agentport::Component {
+        agentport::Component {
+            name: name.into(),
+            kind: ComponentKind::Agent,
+            source: PathBuf::from(name),
+            active: false,
+            agent_format: Some(format),
+        }
     }
 }

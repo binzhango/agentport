@@ -1,4 +1,4 @@
-use crate::model::{AgentKind, Component, ComponentKind, DetectedAgent, InstallScope};
+use crate::model::{AgentFormat, AgentKind, Component, ComponentKind, DetectedAgent, InstallScope};
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +25,24 @@ impl AgentAdapter for NativeAdapter {
         match component.kind {
             ComponentKind::Plugin => matches!(self.0, AgentKind::Codex),
             ComponentKind::Skill | ComponentKind::Command => true,
-            ComponentKind::Agent => !matches!(self.0, AgentKind::Codex),
+            ComponentKind::Agent => matches!(
+                (self.0, component.agent_format),
+                (AgentKind::Codex, Some(AgentFormat::CodexToml))
+                    | (
+                        AgentKind::Claude
+                            | AgentKind::Cursor
+                            | AgentKind::Gemini
+                            | AgentKind::Copilot,
+                        Some(AgentFormat::Markdown)
+                    )
+                    | (
+                        AgentKind::Claude
+                            | AgentKind::Cursor
+                            | AgentKind::Gemini
+                            | AgentKind::Copilot,
+                        Some(AgentFormat::Harness)
+                    )
+            ),
             ComponentKind::Hook => {
                 matches!(self.0, AgentKind::Claude | AgentKind::Copilot)
                     && hook_schema_matches(&component.source, self.0)
@@ -54,11 +71,9 @@ impl AgentAdapter for NativeAdapter {
             ) => env_path("CODEX_HOME")
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("skills"),
-            (
-                AgentKind::Codex | AgentKind::Claude | AgentKind::Copilot,
-                InstallScope::Project,
-                ComponentKind::Skill | ComponentKind::Command,
-            ) => project.join(".agents/skills"),
+            (_, InstallScope::Project, ComponentKind::Skill | ComponentKind::Command) => {
+                project.join(".agents/skills")
+            }
             (
                 AgentKind::Claude,
                 InstallScope::Global,
@@ -73,6 +88,28 @@ impl AgentAdapter for NativeAdapter {
             ) => env_path("COPILOT_HOME")
                 .unwrap_or_else(|| home.join(".copilot"))
                 .join("skills"),
+            (
+                AgentKind::Cursor,
+                InstallScope::Global,
+                ComponentKind::Skill | ComponentKind::Command,
+            ) => env_path("CURSOR_HOME")
+                .unwrap_or_else(|| home.join(".cursor"))
+                .join("skills"),
+            (
+                AgentKind::Gemini,
+                InstallScope::Global,
+                ComponentKind::Skill | ComponentKind::Command,
+            ) => env_path("GEMINI_HOME")
+                .unwrap_or_else(|| home.join(".gemini"))
+                .join("skills"),
+            (AgentKind::Codex, InstallScope::Global, ComponentKind::Agent) => {
+                env_path("CODEX_HOME")
+                    .unwrap_or_else(|| home.join(".codex"))
+                    .join("agents")
+            }
+            (AgentKind::Codex, InstallScope::Project, ComponentKind::Agent) => {
+                project.join(".codex/agents")
+            }
             (AgentKind::Claude, InstallScope::Global, ComponentKind::Agent) => {
                 env_path("CLAUDE_CONFIG_DIR")
                     .unwrap_or_else(|| home.join(".claude"))
@@ -80,6 +117,22 @@ impl AgentAdapter for NativeAdapter {
             }
             (AgentKind::Claude, InstallScope::Project, ComponentKind::Agent) => {
                 project.join(".claude/agents")
+            }
+            (AgentKind::Cursor, InstallScope::Global, ComponentKind::Agent) => {
+                env_path("CURSOR_HOME")
+                    .unwrap_or_else(|| home.join(".cursor"))
+                    .join("agents")
+            }
+            (AgentKind::Cursor, InstallScope::Project, ComponentKind::Agent) => {
+                project.join(".cursor/agents")
+            }
+            (AgentKind::Gemini, InstallScope::Global, ComponentKind::Agent) => {
+                env_path("GEMINI_HOME")
+                    .unwrap_or_else(|| home.join(".gemini"))
+                    .join("agents")
+            }
+            (AgentKind::Gemini, InstallScope::Project, ComponentKind::Agent) => {
+                project.join(".gemini/agents")
             }
             (AgentKind::Copilot, InstallScope::Global, ComponentKind::Agent) => {
                 env_path("COPILOT_HOME")
@@ -99,10 +152,15 @@ impl AgentAdapter for NativeAdapter {
             }
             // Claude hook files are retained as package assets but cannot be loaded standalone without
             // mutating settings.json, so schema-compatible hooks are reported but skipped for now.
-            (AgentKind::Claude, _, ComponentKind::Hook) => return None,
+            (AgentKind::Claude | AgentKind::Cursor | AgentKind::Gemini, _, ComponentKind::Hook) => {
+                return None;
+            }
             _ => return None,
         };
         let file_name = match component.kind {
+            ComponentKind::Agent if component.agent_format == Some(AgentFormat::CodexToml) => {
+                format!("{}.toml", component.name)
+            }
             ComponentKind::Agent => format!("{}.md", component.name),
             ComponentKind::Hook => format!("{}.json", component.name),
             _ => component.name.clone(),
@@ -124,6 +182,14 @@ pub fn detect_agents() -> Vec<DetectedAgent> {
                 AgentKind::Claude => (
                     "claude",
                     env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home.join(".claude")),
+                ),
+                AgentKind::Cursor => (
+                    "cursor",
+                    env_path("CURSOR_HOME").unwrap_or_else(|| home.join(".cursor")),
+                ),
+                AgentKind::Gemini => (
+                    "gemini",
+                    env_path("GEMINI_HOME").unwrap_or_else(|| home.join(".gemini")),
                 ),
                 AgentKind::Copilot => (
                     "copilot",
@@ -198,7 +264,7 @@ fn hook_schema_matches(path: &Path, agent: AgentKind) -> bool {
             "permissionRequest",
             "notification",
         ],
-        AgentKind::Codex => &[],
+        AgentKind::Codex | AgentKind::Cursor | AgentKind::Gemini => &[],
     };
     !hooks.is_empty() && hooks.keys().all(|key| allowed.contains(&key.as_str()))
 }
@@ -215,6 +281,7 @@ mod tests {
             kind: ComponentKind::Skill,
             source: PathBuf::from("demo"),
             active: false,
+            agent_format: None,
         };
         assert_eq!(
             NativeAdapter(AgentKind::Codex)
@@ -234,5 +301,66 @@ mod tests {
                 .unwrap(),
             PathBuf::from("/work/.agents/skills/demo")
         );
+        assert_eq!(
+            NativeAdapter(AgentKind::Cursor)
+                .destination(&component, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.agents/skills/demo")
+        );
+        assert_eq!(
+            NativeAdapter(AgentKind::Gemini)
+                .destination(&component, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.agents/skills/demo")
+        );
+    }
+
+    #[test]
+    fn project_subagent_destinations_use_native_agent_directories() {
+        let project = Path::new("/work");
+        let markdown = Component {
+            name: "demo".into(),
+            kind: ComponentKind::Agent,
+            source: PathBuf::from("demo.md"),
+            active: false,
+            agent_format: Some(AgentFormat::Markdown),
+        };
+        let toml = Component {
+            name: "demo".into(),
+            kind: ComponentKind::Agent,
+            source: PathBuf::from("demo.toml"),
+            active: false,
+            agent_format: Some(AgentFormat::CodexToml),
+        };
+
+        assert_eq!(
+            NativeAdapter(AgentKind::Codex)
+                .destination(&toml, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.codex/agents/demo.toml")
+        );
+        assert_eq!(
+            NativeAdapter(AgentKind::Claude)
+                .destination(&markdown, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.claude/agents/demo.md")
+        );
+        assert_eq!(
+            NativeAdapter(AgentKind::Cursor)
+                .destination(&markdown, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.cursor/agents/demo.md")
+        );
+        assert_eq!(
+            NativeAdapter(AgentKind::Gemini)
+                .destination(&markdown, InstallScope::Project, project)
+                .unwrap(),
+            PathBuf::from("/work/.gemini/agents/demo.md")
+        );
+        assert!(!NativeAdapter(AgentKind::Codex).supports(&markdown));
+        assert!(!NativeAdapter(AgentKind::Claude).supports(&toml));
+        assert!(!NativeAdapter(AgentKind::Cursor).supports(&toml));
+        assert!(!NativeAdapter(AgentKind::Gemini).supports(&toml));
+        assert!(!NativeAdapter(AgentKind::Copilot).supports(&toml));
     }
 }

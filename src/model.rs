@@ -6,16 +6,26 @@ use std::path::PathBuf;
 pub enum AgentKind {
     Codex,
     Claude,
+    Cursor,
+    Gemini,
     Copilot,
 }
 
 impl AgentKind {
-    pub const ALL: [Self; 3] = [Self::Codex, Self::Claude, Self::Copilot];
+    pub const ALL: [Self; 5] = [
+        Self::Codex,
+        Self::Claude,
+        Self::Cursor,
+        Self::Gemini,
+        Self::Copilot,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
+            Self::Cursor => "Cursor",
+            Self::Gemini => "Gemini CLI",
             Self::Copilot => "GitHub Copilot",
         }
     }
@@ -48,12 +58,31 @@ pub enum ComponentKind {
     Mcp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFormat {
+    Markdown,
+    CodexToml,
+    Harness,
+}
+
+impl AgentFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Markdown => "Markdown subagent",
+            Self::CodexToml => "Codex TOML subagent",
+            Self::Harness => "Harness agent package",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Component {
     pub name: String,
     pub kind: ComponentKind,
     pub source: PathBuf,
     pub active: bool,
+    pub agent_format: Option<AgentFormat>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +121,16 @@ impl Artifact {
             .any(|component| component.kind == ComponentKind::Hook)
         {
             return "standalone hooks package".into();
+        }
+        if self.components.len() == 1
+            && let Some(component) = self.components.first()
+            && component.kind == ComponentKind::Agent
+        {
+            return component
+                .agent_format
+                .map(AgentFormat::label)
+                .unwrap_or("subagent")
+                .into();
         }
         let skills = self
             .components
@@ -161,6 +200,10 @@ pub enum PlannedOperation {
         from: PathBuf,
         to: PathBuf,
     },
+    WriteFile {
+        to: PathBuf,
+        content: Vec<u8>,
+    },
     InstallCodexPlugin {
         plugin: String,
         marketplace: String,
@@ -173,9 +216,22 @@ pub enum PlannedOperation {
 }
 
 impl PlannedOperation {
+    pub fn destination(&self) -> &PathBuf {
+        match self {
+            Self::CopyDirectory { to, .. }
+            | Self::CopyFile { to, .. }
+            | Self::WriteFile { to, .. } => to,
+            Self::InstallCodexPlugin { snapshot_to, .. } => snapshot_to
+                .as_ref()
+                .expect("Codex plugin operations do not have a single destination path"),
+        }
+    }
+
     pub fn display(&self) -> String {
         match self {
-            Self::CopyDirectory { to, .. } | Self::CopyFile { to, .. } => to.display().to_string(),
+            Self::CopyDirectory { to, .. }
+            | Self::CopyFile { to, .. }
+            | Self::WriteFile { to, .. } => to.display().to_string(),
             Self::InstallCodexPlugin {
                 plugin,
                 marketplace,

@@ -4,6 +4,17 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-01
+
+### Added
+
+- Selectable repo subagent installs, including Markdown subagents for Claude
+  Code, Cursor, Gemini CLI, and GitHub Copilot, plus Codex TOML subagents.
+- Codex TOML generation for Markdown subagents and Harness agent packages.
+- Project-scope Harness installs now set up root `AGENTS.md` and `.harness/`
+  files in addition to native agent registration.
+- Cursor and Gemini CLI detection and native global/project destinations.
+
 ## [0.1.2] - 2026-06-24
 
 ### Added
@@ -54,7 +65,8 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 - Transactional file writes, managed installation records, and hash-safe uninstall.
 - Active-content review for scripts, hooks, and MCP definitions.
 
-[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/binzhango/agentport/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/binzhango/agentport/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/binzhango/agentport/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/binzhango/agentport/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/binzhango/agentport/releases/tag/v0.1.0
