@@ -7,10 +7,10 @@
 
 **Install agent skills and plugins without guessing where their files will go.**
 
-Agentport is an interactive terminal installer for Codex, Claude Code, and
-GitHub Copilot. Give it a public GitHub repository, local directory, ZIP file,
-or tar archive; it discovers the package contents, detects compatible agents,
-and previews every destination before writing anything.
+Agentport is an interactive terminal installer for Codex, Claude Code, Cursor,
+Gemini CLI, and GitHub Copilot. Give it a public GitHub repository, local
+directory, ZIP file, or tar archive; it discovers the package contents, detects
+compatible agents, and previews every destination before writing anything.
 
 ## Why Agentport?
 
@@ -19,7 +19,8 @@ destination. Agentport provides one reviewable workflow:
 
 - Discover skills, command-style skills, agent definitions, hooks, and Codex
   plugins from a package.
-- Select individual artifacts instead of installing everything blindly.
+- Select individual artifacts and subagents instead of installing everything
+  blindly.
 - Install into the current repository by default using the open `.agents/skills`
   convention, or globally with `-g` / `--global`.
 - Keep Codex plugin bundles intact and install them through the Codex CLI.
@@ -48,6 +49,7 @@ Or scan a source immediately:
 
 ```sh
 agentport https://github.com/DietrichGebert/ponytail
+agentport https://github.com/binzhango/harness_util
 agentport ./my-skill
 agentport ~/Downloads/skills.zip
 agentport ~/Downloads/skills.tar.gz
@@ -78,13 +80,15 @@ installs require explicit confirmation before writing to the current directory.
 
 ## What gets installed?
 
-| Component | Codex | Claude Code | GitHub Copilot |
-| --- | --- | --- | --- |
-| Skills and command-style skills | Global or project | Global or project | Global or project |
-| Agent definitions | — | Global or project | Global or project |
-| Codex plugins | Native CLI, global | — | — |
-| Standalone hooks | Managed local plugin | Detected, not merged | Compatible schemas |
-| Standalone MCP configuration | Detected, not merged | Detected, not merged | Detected, not merged |
+| Component | Codex | Claude Code | Cursor | Gemini CLI | GitHub Copilot |
+| --- | --- | --- | --- | --- | --- |
+| Skills and command-style skills | Global or project | Global or project | Global or project | Global or project | Global or project |
+| Markdown subagents | Converted to TOML | Global or project | Global or project | Global or project | Global or project |
+| Harness agent packages | Converted to TOML | Global or project | Global or project | Global or project | Global or project |
+| Codex TOML subagents | Global or project | — | — | — | — |
+| Codex plugins | Native CLI, global | — | — | — | — |
+| Standalone hooks | Managed local plugin | Detected, not merged | — | — | Compatible schemas |
+| Standalone MCP configuration | Detected, not merged | Detected, not merged | Detected, not merged | Detected, not merged | Detected, not merged |
 
 Agentport does not merge standalone MCP configuration into existing agent
 configuration because there is no safe, lossless cross-agent destination.
@@ -96,12 +100,41 @@ MCP servers bundled in a Codex plugin remain part of that native plugin.
 | --- | --- | --- |
 | Codex | `~/.codex/skills` | `.agents/skills` |
 | Claude Code | `~/.claude/skills` | `.agents/skills` |
+| Cursor | `~/.cursor/skills` | `.agents/skills` |
+| Gemini CLI | `~/.gemini/skills` | `.agents/skills` |
 | GitHub Copilot | `~/.copilot/skills` | `.agents/skills` |
 
 Project skill installs are rooted at the current Git repository root. The
 `.agents/skills` path follows the open Agent Skills convention for cross-client
-reuse. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `COPILOT_HOME` are honored for
-global installs.
+reuse. `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `CURSOR_HOME`, `GEMINI_HOME`, and
+`COPILOT_HOME` are honored for global installs.
+
+### Subagent destinations
+
+Agentport scans repo-style subagent packages and native agent folders, including
+`agents/*.md`, `.claude/agents/*.md`, `.cursor/agents/*.md`,
+`.gemini/agents/*.md`, `.codex/agents/*.toml`, and `codex/agents/*.toml`.
+Harness repositories with root `AGENTS.md` plus `.harness/` are listed as one
+Harness agent package, not as separate internal skill documents.
+
+| Agent | Global | Project |
+| --- | --- | --- |
+| Codex | `~/.codex/agents/*.toml` | `.codex/agents/*.toml` |
+| Claude Code | `~/.claude/agents/*.md` | `.claude/agents/*.md` |
+| Cursor | `~/.cursor/agents/*.md` | `.cursor/agents/*.md` |
+| Gemini CLI | `~/.gemini/agents/*.md` | `.gemini/agents/*.md` |
+| GitHub Copilot | `~/.copilot/agents/*.md` | `.github/agents/*.md` |
+
+Markdown and Harness subagents are converted to Codex TOML when Codex is
+selected. Codex TOML subagents are not converted back to Markdown for other
+tools. Codex repo-local subagents can be installed, but some tool-backed Codex
+sessions may not reliably invoke custom agents by name yet.
+
+Project-scope Harness installs also set up the real Harness payload at the
+repository root by copying `AGENTS.md` and `.harness/`. The native agent entry is
+only a generated launcher/registration file that points back to the project-root
+Harness; `.harness/` remains the source of the workflow rules, skills, wiki,
+templates, and change records.
 
 ### Codex plugin behavior
 

@@ -127,21 +127,65 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
                 ));
                 continue;
             }
-            if !adapter.supports(component) {
-                skipped.push(format!(
-                    "{} ({:?}): unsupported by {}",
-                    component.name,
-                    component.kind,
-                    agent.label()
-                ));
-                continue;
+            if component.agent_format == Some(crate::model::AgentFormat::Harness)
+                && *scope == InstallScope::Project
+            {
+                for operation in harness_project_setup_operations(component, &request.project) {
+                    let destination = operation.destination().to_path_buf();
+                    if planned_destinations.contains(&destination) {
+                        continue;
+                    }
+                    validate_destination(&destination, &managed)?;
+                    planned_destinations.insert(destination);
+                    operations.push(operation);
+                }
             }
-            let Some(destination) = adapter.destination(component, *scope, &request.project) else {
+            let codex_conversion =
+                converted_codex_subagent(component, *agent, *scope, &request.project)?;
+            if codex_conversion.is_none() && !adapter.supports(component) {
+                let reason = if component.kind == crate::model::ComponentKind::Agent {
+                    match component.agent_format {
+                        Some(crate::model::AgentFormat::CodexToml) => {
+                            "Codex TOML subagents require Codex"
+                        }
+                        Some(crate::model::AgentFormat::Markdown) => {
+                            "Markdown subagents require Claude Code, Cursor, Gemini CLI, or GitHub Copilot"
+                        }
+                        Some(crate::model::AgentFormat::Harness) => {
+                            "Harness agent packages require Claude Code, Cursor, Gemini CLI, or GitHub Copilot"
+                        }
+                        None => "subagent format was not recognized",
+                    }
+                } else {
+                    "unsupported component"
+                };
                 skipped.push(format!(
-                    "{} ({:?}): no safe standalone destination",
+                    "{} ({:?}): {reason}",
                     component.name, component.kind
                 ));
                 continue;
+            }
+            let (destination, generated_content) = if let Some((destination, content)) =
+                codex_conversion
+            {
+                (destination, Some(content))
+            } else if let Some((destination, content)) = generated_harness_markdown_registration(
+                component,
+                *agent,
+                *scope,
+                &request.project,
+            )? {
+                (destination, Some(content))
+            } else {
+                let Some(destination) = adapter.destination(component, *scope, &request.project)
+                else {
+                    skipped.push(format!(
+                        "{} ({:?}): no safe standalone destination",
+                        component.name, component.kind
+                    ));
+                    continue;
+                };
+                (destination, None)
             };
             let shared_project_skill = *scope == InstallScope::Project
                 && matches!(
@@ -155,20 +199,14 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
                 ));
                 continue;
             }
-            if destination.exists() && !managed.contains(&destination) {
-                bail!(
-                    "refusing to overwrite unmanaged path {}",
-                    destination.display()
-                );
-            }
-            if destination.exists() {
-                bail!(
-                    "{} is already managed; uninstall it before reinstalling",
-                    destination.display()
-                );
-            }
+            validate_destination(&destination, &managed)?;
             let planned_destination = destination.clone();
-            let operation = if component.source.is_dir() {
+            let operation = if let Some(content) = generated_content {
+                PlannedOperation::WriteFile {
+                    to: destination,
+                    content,
+                }
+            } else if component.source.is_dir() {
                 PlannedOperation::CopyDirectory {
                     from: component.source.clone(),
                     to: destination,
@@ -210,6 +248,296 @@ pub fn build_plan(request: &InstallRequest, store: &StateStore) -> Result<Instal
         targets,
         warnings,
     })
+}
+
+fn validate_destination(destination: &Path, managed: &HashSet<PathBuf>) -> Result<()> {
+    if destination.exists() && !managed.contains(destination) {
+        bail!(
+            "refusing to overwrite unmanaged path {}",
+            destination.display()
+        );
+    }
+    if destination.exists() {
+        bail!(
+            "{} is already managed; uninstall it before reinstalling",
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+fn harness_project_setup_operations(
+    component: &crate::model::Component,
+    project: &Path,
+) -> Vec<PlannedOperation> {
+    let mut operations = Vec::new();
+    let agents = component.source.join("AGENTS.md");
+    if agents.is_file() {
+        operations.push(PlannedOperation::CopyFile {
+            from: agents,
+            to: project.join("AGENTS.md"),
+        });
+    }
+    let harness = component.source.join(".harness");
+    if harness.is_dir() {
+        operations.push(PlannedOperation::CopyDirectory {
+            from: harness,
+            to: project.join(".harness"),
+        });
+    }
+    operations
+}
+
+fn converted_codex_subagent(
+    component: &crate::model::Component,
+    agent: AgentKind,
+    scope: InstallScope,
+    project: &Path,
+) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    if agent != AgentKind::Codex || component.kind != crate::model::ComponentKind::Agent {
+        return Ok(None);
+    }
+    match component.agent_format {
+        Some(crate::model::AgentFormat::Markdown) => {
+            let destination = codex_agent_destination(&component.name, scope, project)?;
+            let markdown = fs::read_to_string(&component.source)
+                .with_context(|| format!("read {}", component.source.display()))?;
+            Ok(Some((
+                destination,
+                markdown_agent_to_codex_toml(&component.name, &markdown).into_bytes(),
+            )))
+        }
+        Some(crate::model::AgentFormat::Harness) => {
+            let destination = codex_agent_destination(&component.name, scope, project)?;
+            Ok(Some((
+                destination,
+                harness_agent_to_codex_toml(&component.name, &component.source)?.into_bytes(),
+            )))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn generated_harness_markdown_registration(
+    component: &crate::model::Component,
+    agent: AgentKind,
+    scope: InstallScope,
+    project: &Path,
+) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    if component.agent_format != Some(crate::model::AgentFormat::Harness)
+        || agent == AgentKind::Codex
+        || component.kind != crate::model::ComponentKind::Agent
+    {
+        return Ok(None);
+    }
+    let adapter = NativeAdapter(agent);
+    let destination = adapter
+        .destination(component, scope, project)
+        .context("determine Harness registration destination")?;
+    Ok(Some((
+        destination,
+        harness_markdown_registration(&component.name).into_bytes(),
+    )))
+}
+
+fn harness_markdown_registration(name: &str) -> String {
+    format!(
+        r#"---
+name: {name}
+description: Harness agent package. Read the project-root AGENTS.md and .harness/ before acting.
+---
+
+# {name}
+
+This is an Agentport-generated registration file for a Harness agent package.
+
+Before doing task work:
+
+1. Read the project-root `AGENTS.md`.
+2. Read the relevant files under the project-root `.harness/` directory.
+3. Treat `.harness/Rules`, `.harness/Skills`, `.harness/Wiki`, `.harness/Templates`, and `.harness/Changes` as the Harness operating system for this repository.
+
+Do not use files next to this registration file as the Harness source of truth. The real Harness definition is installed at the repository root.
+"#
+    )
+}
+
+fn codex_agent_destination(name: &str, scope: InstallScope, project: &Path) -> Result<PathBuf> {
+    let base = match scope {
+        InstallScope::Global => std::env::var_os("CODEX_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
+            .context("determine Codex home")?,
+        InstallScope::Project => project.join(".codex"),
+    };
+    Ok(base.join("agents").join(format!("{name}.toml")))
+}
+
+fn markdown_agent_to_codex_toml(default_name: &str, markdown: &str) -> String {
+    let (frontmatter, body) = parse_frontmatter(markdown);
+    let name = frontmatter
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| default_name.to_owned());
+    let description = frontmatter
+        .get("description")
+        .cloned()
+        .or_else(|| first_markdown_heading(body))
+        .unwrap_or_else(|| format!("Converted markdown subagent {name}"));
+    let model = frontmatter.get("model").cloned();
+    codex_agent_toml(
+        &name,
+        &description,
+        body.trim(),
+        Vec::new(),
+        model.as_deref(),
+        None,
+    )
+}
+
+fn harness_agent_to_codex_toml(name: &str, root: &Path) -> Result<String> {
+    let mut instructions = String::new();
+    append_markdown_file(&mut instructions, "AGENTS.md", &root.join("AGENTS.md"))?;
+    append_markdown_tree(&mut instructions, "Rules", &root.join(".harness/Rules"))?;
+    append_markdown_tree(&mut instructions, "Skills", &root.join(".harness/Skills"))?;
+    append_markdown_tree(&mut instructions, "Wiki", &root.join(".harness/Wiki"))?;
+    let description = format!("Harness agent package converted from {name}");
+    Ok(codex_agent_toml(
+        name,
+        &description,
+        instructions.trim(),
+        vec![name.to_owned(), name.replace(['_', '-'], " ")],
+        None,
+        None,
+    ))
+}
+
+fn append_markdown_tree(output: &mut String, label: &str, directory: &Path) -> Result<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let mut files = WalkDir::new(directory)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.path().extension().and_then(|value| value.to_str()) == Some("md")
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .collect::<Vec<_>>();
+    files.sort();
+    for path in files {
+        let relative = path.strip_prefix(directory).unwrap_or(&path);
+        append_markdown_file(
+            output,
+            &format!(".harness/{label}/{}", relative.display()),
+            &path,
+        )?;
+    }
+    Ok(())
+}
+
+fn append_markdown_file(output: &mut String, label: &str, path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    output.push_str("\n\n# ");
+    output.push_str(label);
+    output.push_str("\n\n");
+    output.push_str(content.trim());
+    output.push('\n');
+    Ok(())
+}
+
+fn parse_frontmatter(markdown: &str) -> (std::collections::BTreeMap<String, String>, &str) {
+    let mut fields = std::collections::BTreeMap::new();
+    let Some(rest) = markdown.strip_prefix("---\n") else {
+        return (fields, markdown);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (fields, markdown);
+    };
+    let raw = &rest[..end];
+    for line in raw.lines() {
+        if let Some((key, value)) = line.split_once(':') {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            fields.insert(key.trim().to_owned(), value.to_owned());
+        }
+    }
+    let body_start = end + "\n---".len();
+    let body = rest[body_start..]
+        .strip_prefix('\n')
+        .unwrap_or(&rest[body_start..]);
+    (fields, body)
+}
+
+fn first_markdown_heading(markdown: &str) -> Option<String> {
+    markdown.lines().find_map(|line| {
+        line.strip_prefix("# ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn codex_agent_toml(
+    name: &str,
+    description: &str,
+    developer_instructions: &str,
+    nickname_candidates: Vec<String>,
+    model: Option<&str>,
+    model_reasoning_effort: Option<&str>,
+) -> String {
+    let mut output = String::new();
+    output.push_str("name = ");
+    output.push_str(&toml_string(name));
+    output.push('\n');
+    output.push_str("description = ");
+    output.push_str(&toml_string(description));
+    output.push('\n');
+    output.push_str("developer_instructions = ");
+    output.push_str(&toml_string(developer_instructions));
+    output.push('\n');
+    if !nickname_candidates.is_empty() {
+        output.push_str("nickname_candidates = [");
+        for (index, nickname) in nickname_candidates.iter().enumerate() {
+            if index > 0 {
+                output.push_str(", ");
+            }
+            output.push_str(&toml_string(nickname));
+        }
+        output.push_str("]\n");
+    }
+    if let Some(model) = model {
+        output.push_str("model = ");
+        output.push_str(&toml_string(model));
+        output.push('\n');
+    }
+    if let Some(effort) = model_reasoning_effort {
+        output.push_str("model_reasoning_effort = ");
+        output.push_str(&toml_string(effort));
+        output.push('\n');
+    }
+    output
+}
+
+fn toml_string(value: &str) -> String {
+    let mut output = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => output.push_str("\\\\"),
+            '"' => output.push_str("\\\""),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            c => output.push(c),
+        }
+    }
+    output.push('"');
+    output
 }
 
 pub fn execute_plan(plan: &InstallPlan, store: &StateStore) -> Result<ManagedInstallation> {
@@ -273,6 +601,14 @@ pub fn execute_plan_with_runner(
                             bail!("destination appeared during installation: {}", to.display());
                         }
                         atomic_copy_file(from, to)?;
+                        committed_roots.push(to.clone());
+                        files.extend(hash_destination(to)?);
+                    }
+                    PlannedOperation::WriteFile { to, content } => {
+                        if to.exists() {
+                            bail!("destination appeared during installation: {}", to.display());
+                        }
+                        atomic_write_file(content, to)?;
                         committed_roots.push(to.clone());
                         files.extend(hash_destination(to)?);
                     }
@@ -661,6 +997,15 @@ fn atomic_copy_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+fn atomic_write_file(content: &[u8], to: &Path) -> Result<()> {
+    let parent = to.parent().context("destination has no parent")?;
+    fs::create_dir_all(parent)?;
+    let stage = parent.join(format!(".agentport-stage-{}", unique_suffix()));
+    fs::write(&stage, content)?;
+    fs::rename(&stage, to).with_context(|| format!("commit {}", to.display()))?;
+    Ok(())
+}
+
 fn copy_directory(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to)?;
     for entry in WalkDir::new(from).follow_links(false) {
@@ -856,6 +1201,7 @@ mod tests {
                     kind: ComponentKind::Skill,
                     source: skill,
                     active: true,
+                    agent_format: None,
                 }],
                 codex_plugin: None,
             },
@@ -888,6 +1234,7 @@ mod tests {
                     kind: ComponentKind::Skill,
                     source: skill,
                     active: false,
+                    agent_format: None,
                 }],
                 codex_plugin: None,
             },
@@ -926,6 +1273,7 @@ mod tests {
                     kind: ComponentKind::Skill,
                     source: skill,
                     active: false,
+                    agent_format: None,
                 }],
                 codex_plugin: None,
             },
@@ -968,6 +1316,7 @@ mod tests {
                 kind: ComponentKind::Plugin,
                 source: root,
                 active: false,
+                agent_format: None,
             }],
             codex_plugin: Some(crate::model::CodexPlugin {
                 name: "demo".into(),
@@ -1003,6 +1352,7 @@ mod tests {
                 kind: ComponentKind::Plugin,
                 source: temp.path().into(),
                 active: false,
+                agent_format: None,
             }],
             codex_plugin: Some(crate::model::CodexPlugin {
                 name: "demo".into(),
@@ -1022,6 +1372,328 @@ mod tests {
         let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
         assert!(plan.targets[0].operations.is_empty());
         assert!(plan.targets[0].skipped[0].contains("global-only"));
+    }
+
+    #[test]
+    fn codex_toml_subagent_plans_to_codex_project_agents() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness.toml");
+        fs::write(&source, "developer_instructions = \"demo\"").unwrap();
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::CodexToml),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Codex, InstallScope::Project)],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+
+        assert!(matches!(
+            &plan.targets[0].operations[0],
+            PlannedOperation::CopyFile { to, .. }
+                if to == &project.join(".codex/agents/harness.toml")
+        ));
+    }
+
+    #[test]
+    fn markdown_subagent_plans_to_markdown_agent_project_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness.md");
+        fs::write(&source, "---\nname: harness\n---\n").unwrap();
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::Markdown),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![
+                (AgentKind::Claude, InstallScope::Project),
+                (AgentKind::Cursor, InstallScope::Project),
+                (AgentKind::Gemini, InstallScope::Project),
+            ],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+        let destinations = plan
+            .targets
+            .iter()
+            .flat_map(|target| &target.operations)
+            .filter_map(|operation| match operation {
+                PlannedOperation::CopyFile { to, .. } => Some(to.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            destinations,
+            vec![
+                project.join(".claude/agents/harness.md"),
+                project.join(".cursor/agents/harness.md"),
+                project.join(".gemini/agents/harness.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn harness_agent_package_plans_project_setup_and_generated_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness_util");
+        fs::create_dir_all(source.join(".harness/Skills")).unwrap();
+        fs::write(source.join("AGENTS.md"), "harness").unwrap();
+        fs::write(source.join(".harness/Skills/coding-skill.md"), "internal").unwrap();
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness--harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::Harness),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Claude, InstallScope::Project)],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+
+        let destinations = plan.targets[0]
+            .operations
+            .iter()
+            .map(|operation| operation.display())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            destinations,
+            vec![
+                project.join("AGENTS.md").display().to_string(),
+                project.join(".harness").display().to_string(),
+                project
+                    .join(".claude/agents/harness.md")
+                    .display()
+                    .to_string(),
+            ]
+        );
+        assert!(matches!(
+            &plan.targets[0].operations[2],
+            PlannedOperation::WriteFile { content, .. }
+                if String::from_utf8_lossy(content).contains("project-root `AGENTS.md`")
+                    && String::from_utf8_lossy(content).contains("project-root `.harness/`")
+        ));
+    }
+
+    #[test]
+    fn harness_install_writes_root_payload_and_registration_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness_util");
+        fs::create_dir_all(source.join(".harness/Skills")).unwrap();
+        fs::write(source.join("AGENTS.md"), "harness").unwrap();
+        fs::write(source.join(".harness/Skills/coding-skill.md"), "internal").unwrap();
+        let project = temp.path().join("project");
+        let state = StateStore::new(temp.path().join("state"));
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness--harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::Harness),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Copilot, InstallScope::Project)],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &state).unwrap();
+        execute_plan(&plan, &state).unwrap();
+
+        assert!(project.join("AGENTS.md").is_file());
+        assert!(project.join(".harness/Skills/coding-skill.md").is_file());
+        assert!(project.join(".github/agents/harness.md").is_file());
+        assert!(!project.join(".github/agents/harness/AGENTS.md").exists());
+    }
+
+    #[test]
+    fn markdown_subagent_plans_generated_codex_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("reviewer.md");
+        fs::write(
+            &source,
+            "---\nname: reviewer\ndescription: Reviews code\nmodel: gpt-5\n---\n# Reviewer\n\nCheck the code.",
+        )
+        .unwrap();
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "reviewer".into(),
+                name: "reviewer".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "reviewer".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::Markdown),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Codex, InstallScope::Project)],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+
+        assert!(plan.targets[0].skipped.is_empty());
+        assert!(matches!(
+            &plan.targets[0].operations[0],
+            PlannedOperation::WriteFile { to, content }
+                if to == &project.join(".codex/agents/reviewer.toml")
+                    && String::from_utf8_lossy(content).contains("developer_instructions")
+                    && String::from_utf8_lossy(content).contains("Check the code.")
+                    && String::from_utf8_lossy(content).contains("model = \"gpt-5\"")
+        ));
+    }
+
+    #[test]
+    fn harness_agent_package_plans_generated_codex_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness_util");
+        fs::create_dir_all(source.join(".harness/Skills")).unwrap();
+        fs::write(source.join("AGENTS.md"), "# Contract\n\nRead the harness.").unwrap();
+        fs::write(
+            source.join(".harness/Skills/coding-skill.md"),
+            "# Coding Skill\n\nImplement carefully.",
+        )
+        .unwrap();
+        let project = temp.path().join("project");
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness--harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::Harness),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Codex, InstallScope::Project)],
+            project: project.clone(),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+
+        assert!(plan.targets[0].skipped.is_empty());
+        assert_eq!(plan.targets[0].operations.len(), 3);
+        assert!(matches!(
+            &plan.targets[0].operations[0],
+            PlannedOperation::CopyFile { to, .. }
+                if to == &project.join("AGENTS.md")
+        ));
+        assert!(matches!(
+            &plan.targets[0].operations[1],
+            PlannedOperation::CopyDirectory { to, .. }
+                if to == &project.join(".harness")
+        ));
+        assert!(matches!(
+            &plan.targets[0].operations[2],
+            PlannedOperation::WriteFile { to, content }
+                if to == &project.join(".codex/agents/harness.toml")
+                    && String::from_utf8_lossy(content).contains("Harness agent package converted from harness")
+                    && String::from_utf8_lossy(content).contains("Read the harness.")
+                    && String::from_utf8_lossy(content).contains("Implement carefully.")
+        ));
+    }
+
+    #[test]
+    fn incompatible_subagent_formats_are_skipped_with_reasons() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("harness.toml");
+        fs::write(&source, "developer_instructions = \"demo\"").unwrap();
+        let request = InstallRequest {
+            artifact: Artifact {
+                id: "harness".into(),
+                name: "harness".into(),
+                root: source.clone(),
+                components: vec![Component {
+                    name: "harness".into(),
+                    kind: ComponentKind::Agent,
+                    source,
+                    active: false,
+                    agent_format: Some(crate::model::AgentFormat::CodexToml),
+                }],
+                codex_plugin: None,
+            },
+            source: "local".into(),
+            revision: None,
+            targets: vec![(AgentKind::Claude, InstallScope::Project)],
+            project: temp.path().join("project"),
+            approve_active: false,
+        };
+
+        let plan = build_plan(&request, &StateStore::new(temp.path().join("state"))).unwrap();
+
+        assert!(plan.targets[0].operations.is_empty());
+        assert!(
+            plan.targets[0]
+                .skipped
+                .iter()
+                .any(|reason| reason.contains("Codex TOML")),
+            "{:?}",
+            plan.targets[0].skipped
+        );
     }
 
     #[test]

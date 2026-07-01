@@ -4,6 +4,15 @@ All notable changes to Agentport are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+
+- Selectable repo subagent installs, including Markdown subagents for Claude
+  Code, Cursor, Gemini CLI, and GitHub Copilot, plus Codex TOML subagents.
+- Codex TOML generation for Markdown subagents and Harness agent packages.
+- Project-scope Harness installs now set up root `AGENTS.md` and `.harness/`
+  files in addition to native agent registration.
+- Cursor and Gemini CLI detection and native global/project destinations.
+
 ## [0.1.2] - 2026-06-24
 
 ### Added

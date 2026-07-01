@@ -1,4 +1,4 @@
-use crate::model::{Artifact, CodexPlugin, Component, ComponentKind};
+use crate::model::{AgentFormat, Artifact, CodexPlugin, Component, ComponentKind};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -15,6 +15,10 @@ pub struct DefaultScanner;
 
 impl ArtifactScanner for DefaultScanner {
     fn scan(&self, root: &Path) -> Result<Vec<Artifact>> {
+        if let Some(artifact) = discover_harness_package(root) {
+            return Ok(vec![artifact]);
+        }
+
         let mut roots = discover_artifact_roots(root)?;
         if roots.is_empty() && contains_components(root) {
             roots.push(root.to_path_buf());
@@ -42,6 +46,18 @@ impl ArtifactScanner for DefaultScanner {
                     .to_owned()
             });
             let codex_plugin = codex_plugin_metadata(root, &artifact_root, &name)?;
+            for component in components
+                .iter()
+                .filter(|component| component.kind == ComponentKind::Agent)
+            {
+                artifacts.push(Artifact {
+                    id: format!("{}--agent--{}", slug(&name), slug(&component.name)),
+                    name: component.name.clone(),
+                    root: component.source.clone(),
+                    components: vec![component.clone()],
+                    codex_plugin: None,
+                });
+            }
             if codex_plugin.is_some() {
                 for component in components.iter().filter(|component| {
                     matches!(
@@ -58,25 +74,33 @@ impl ArtifactScanner for DefaultScanner {
                     });
                 }
             }
+            let grouped_components = components
+                .into_iter()
+                .filter(|component| {
+                    component.kind != ComponentKind::Agent
+                        && (codex_plugin.is_none()
+                            || !matches!(
+                                component.kind,
+                                ComponentKind::Skill | ComponentKind::Command
+                            ))
+                })
+                .collect::<Vec<_>>();
+            if grouped_components.is_empty() && codex_plugin.is_none() {
+                continue;
+            }
             artifacts.push(Artifact {
                 id: slug(&name),
                 name,
                 root: artifact_root,
-                components: if codex_plugin.is_some() {
-                    components
-                        .into_iter()
-                        .filter(|component| {
-                            !matches!(
-                                component.kind,
-                                ComponentKind::Skill | ComponentKind::Command
-                            )
-                        })
-                        .collect()
-                } else {
-                    components
-                },
+                components: grouped_components,
                 codex_plugin,
             });
+        }
+
+        if artifacts.is_empty()
+            && let Some(artifact) = discover_direct_subagent_package(root)?
+        {
+            artifacts.push(artifact);
         }
 
         if artifacts.is_empty() {
@@ -231,6 +255,12 @@ fn contains_components(path: &Path) -> bool {
         || path.join("skills").is_dir()
         || path.join("commands").is_dir()
         || path.join("agents").is_dir()
+        || path.join(".claude/agents").is_dir()
+        || path.join(".cursor/agents").is_dir()
+        || path.join(".gemini/agents").is_dir()
+        || path.join(".codex/agents").is_dir()
+        || path.join("codex/agents").is_dir()
+        || is_harness_package(path)
         || path.join("hooks.json").is_file()
         || path.join("hooks/hooks.json").is_file()
         || path.join(".mcp.json").is_file()
@@ -306,6 +336,7 @@ fn discover_components(root: &Path) -> Result<Vec<Component>> {
                     || root.join("hooks/hooks.json").is_file()
                     || root.join("hooks.json").is_file()
                     || root.join(".mcp.json").is_file(),
+                agent_format: None,
             },
         );
     }
@@ -338,30 +369,25 @@ fn discover_components(root: &Path) -> Result<Vec<Component>> {
                         kind: ComponentKind::Command,
                         source: path,
                         active: false,
+                        agent_format: None,
                     },
                 );
             }
         }
     }
 
-    let agents = root.join("agents");
-    if agents.is_dir() {
-        for entry in fs::read_dir(agents)? {
-            let path = entry?.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("md") {
-                let name = file_stem(&path).trim_end_matches(".agent").to_owned();
-                components.insert(
-                    ("agent".into(), name.clone()),
-                    Component {
-                        name,
-                        kind: ComponentKind::Agent,
-                        source: path,
-                        active: false,
-                    },
-                );
-            }
-        }
-    }
+    discover_agent_files(
+        root,
+        &mut components,
+        &[
+            ("agents", "md", AgentFormat::Markdown),
+            (".claude/agents", "md", AgentFormat::Markdown),
+            (".cursor/agents", "md", AgentFormat::Markdown),
+            (".gemini/agents", "md", AgentFormat::Markdown),
+            (".codex/agents", "toml", AgentFormat::CodexToml),
+            ("codex/agents", "toml", AgentFormat::CodexToml),
+        ],
+    )?;
 
     for hook in [root.join("hooks.json"), root.join("hooks/hooks.json")] {
         if hook.is_file() {
@@ -378,6 +404,7 @@ fn discover_components(root: &Path) -> Result<Vec<Component>> {
                     kind: ComponentKind::Hook,
                     source: hook,
                     active: true,
+                    agent_format: None,
                 },
             );
         }
@@ -391,6 +418,7 @@ fn discover_components(root: &Path) -> Result<Vec<Component>> {
                     kind: ComponentKind::Mcp,
                     source: mcp,
                     active: true,
+                    agent_format: None,
                 },
             );
         }
@@ -409,7 +437,158 @@ fn component_for_skill(path: &Path) -> Component {
         kind: ComponentKind::Skill,
         source: path.to_path_buf(),
         active: contains_executable_content(path),
+        agent_format: None,
     }
+}
+
+fn discover_agent_files(
+    root: &Path,
+    components: &mut BTreeMap<(String, String), Component>,
+    directories: &[(&str, &str, AgentFormat)],
+) -> Result<()> {
+    for (directory, extension, format) in directories {
+        let agents = root.join(directory);
+        if !agents.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(agents)? {
+            let path = entry?.path();
+            if path.extension().and_then(|value| value.to_str()) == Some(*extension) {
+                let name = file_stem(&path).trim_end_matches(".agent").to_owned();
+                components.insert(
+                    (format!("agent-{:?}", format).to_lowercase(), name.clone()),
+                    component_for_agent(path, *format),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn discover_direct_subagent_package(root: &Path) -> Result<Option<Artifact>> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(root).context("scan source directory")? {
+        let path = entry?.path();
+        if !path.is_file() || is_documentation_file(&path) {
+            continue;
+        }
+        match path.extension().and_then(|value| value.to_str()) {
+            Some("md") if looks_like_markdown_subagent(&path)? => {
+                candidates.push(component_for_agent(path, AgentFormat::Markdown));
+            }
+            Some("toml") if looks_like_codex_subagent(&path)? => {
+                candidates.push(component_for_agent(path, AgentFormat::CodexToml));
+            }
+            _ => {}
+        }
+    }
+    if candidates.len() != 1 {
+        return Ok(None);
+    }
+    let component = candidates.remove(0);
+    Ok(Some(Artifact {
+        id: format!("agent--{}", slug(&component.name)),
+        name: component.name.clone(),
+        root: component.source.clone(),
+        components: vec![component],
+        codex_plugin: None,
+    }))
+}
+
+fn discover_harness_package(root: &Path) -> Option<Artifact> {
+    if !is_harness_package(root) {
+        return None;
+    }
+    let name = harness_agent_name(root);
+    let component = Component {
+        name: name.clone(),
+        kind: ComponentKind::Agent,
+        source: root.to_path_buf(),
+        active: contains_executable_content(root),
+        agent_format: Some(AgentFormat::Harness),
+    };
+    Some(Artifact {
+        id: format!("harness--{}", slug(&name)),
+        name,
+        root: root.to_path_buf(),
+        components: vec![component],
+        codex_plugin: None,
+    })
+}
+
+fn is_harness_package(path: &Path) -> bool {
+    path.join("AGENTS.md").is_file()
+        && path.join(".harness").is_dir()
+        && path.join(".harness/Skills").is_dir()
+}
+
+fn harness_agent_name(root: &Path) -> String {
+    fs::read_to_string(root.join("AGENTS.md"))
+        .ok()
+        .and_then(|content| frontmatter_field(&content, "name"))
+        .unwrap_or_else(|| "harness".to_owned())
+}
+
+fn frontmatter_field(markdown: &str, key: &str) -> Option<String> {
+    let rest = markdown.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    for line in rest[..end].lines() {
+        if let Some((field, value)) = line.split_once(':')
+            && field.trim() == key
+        {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn component_for_agent(path: PathBuf, format: AgentFormat) -> Component {
+    let name = file_stem(&path).trim_end_matches(".agent").to_owned();
+    Component {
+        name,
+        kind: ComponentKind::Agent,
+        source: path,
+        active: false,
+        agent_format: Some(format),
+    }
+}
+
+fn is_documentation_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "readme.md" | "changelog.md" | "contributing.md" | "security.md" | "license.md"
+    )
+}
+
+fn looks_like_markdown_subagent(path: &Path) -> Result<bool> {
+    let text = fs::read_to_string(path)?;
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        return Ok(false);
+    }
+    let mut has_name = false;
+    let mut has_description = false;
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        has_name |= line.trim_start().starts_with("name:");
+        has_description |= line.trim_start().starts_with("description:");
+    }
+    Ok(has_name && has_description)
+}
+
+fn looks_like_codex_subagent(path: &Path) -> Result<bool> {
+    let text = fs::read_to_string(path)?;
+    Ok(text.contains("developer_instructions") && text.contains("description"))
 }
 
 fn contains_executable_content(path: &Path) -> bool {
@@ -581,6 +760,164 @@ mod tests {
                 .components
                 .iter()
                 .all(|component| component.kind != ComponentKind::Skill)
+        );
+    }
+
+    #[test]
+    fn scans_codex_toml_subagents_as_individual_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".codex/agents")).unwrap();
+        for name in ["harness-util", "reviewer"] {
+            fs::write(
+                temp.path()
+                    .join(".codex/agents")
+                    .join(format!("{name}.toml")),
+                format!(
+                    "name = \"{name}\"\ndescription = \"demo\"\ndeveloper_instructions = \"demo\""
+                ),
+            )
+            .unwrap();
+        }
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().all(|artifact| {
+            artifact.components.len() == 1
+                && artifact.components[0].kind == ComponentKind::Agent
+                && artifact.components[0].agent_format == Some(AgentFormat::CodexToml)
+        }));
+    }
+
+    #[test]
+    fn scans_markdown_subagents_as_individual_artifacts() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("agents")).unwrap();
+        for name in ["planner", "tester"] {
+            fs::write(
+                temp.path().join("agents").join(format!("{name}.md")),
+                format!("---\nname: {name}\ndescription: demo\n---\nDemo"),
+            )
+            .unwrap();
+        }
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 2);
+        assert!(artifacts.iter().all(|artifact| {
+            artifact.components.len() == 1
+                && artifact.components[0].kind == ComponentKind::Agent
+                && artifact.components[0].agent_format == Some(AgentFormat::Markdown)
+        }));
+    }
+
+    #[test]
+    fn scans_tool_native_subagent_folders() {
+        let temp = tempfile::tempdir().unwrap();
+        for folder in [".claude/agents", ".cursor/agents", ".gemini/agents"] {
+            fs::create_dir_all(temp.path().join(folder)).unwrap();
+            fs::write(
+                temp.path().join(folder).join(format!(
+                    "{}.md",
+                    folder.split('/').next().unwrap().trim_start_matches('.')
+                )),
+                "---\nname: demo\ndescription: demo\n---\nDemo",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(temp.path().join("codex/agents")).unwrap();
+        fs::write(
+            temp.path().join("codex/agents/harness.toml"),
+            "name = \"harness\"\ndescription = \"demo\"\ndeveloper_instructions = \"demo\"",
+        )
+        .unwrap();
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 4);
+        assert_eq!(
+            artifacts
+                .iter()
+                .filter(
+                    |artifact| artifact.components[0].agent_format == Some(AgentFormat::Markdown)
+                )
+                .count(),
+            3
+        );
+        assert_eq!(
+            artifacts
+                .iter()
+                .filter(
+                    |artifact| artifact.components[0].agent_format == Some(AgentFormat::CodexToml)
+                )
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scans_harness_repo_as_one_agent_package() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# harness_util\n").unwrap();
+        fs::write(temp.path().join("AGENTS.md"), "# Harness agent\n").unwrap();
+        fs::create_dir_all(temp.path().join(".harness/Skills")).unwrap();
+        for name in ["coding-skill", "expert-reviewer", "unit-test-write"] {
+            fs::write(
+                temp.path()
+                    .join(".harness/Skills")
+                    .join(format!("{name}.md")),
+                format!("# {name}\n\nHarness procedure without frontmatter."),
+            )
+            .unwrap();
+        }
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "harness");
+        assert_eq!(artifacts[0].summary(), "Harness agent package");
+        assert_eq!(artifacts[0].components.len(), 1);
+        assert_eq!(artifacts[0].components[0].kind, ComponentKind::Agent);
+        assert_eq!(
+            artifacts[0].components[0].agent_format,
+            Some(AgentFormat::Harness)
+        );
+        assert_eq!(artifacts[0].components[0].source, temp.path());
+    }
+
+    #[test]
+    fn harness_agent_name_can_come_from_agents_frontmatter() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("AGENTS.md"),
+            "---\nname: delivery-harness\n---\n# Harness agent\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join(".harness/Skills")).unwrap();
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "delivery-harness");
+    }
+
+    #[test]
+    fn scans_direct_single_file_markdown_subagent_repo() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# demo").unwrap();
+        fs::write(
+            temp.path().join("harness_util.md"),
+            "---\nname: harness_util\ndescription: Harness helper\n---\nDemo",
+        )
+        .unwrap();
+
+        let artifacts = DefaultScanner.scan(temp.path()).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].name, "harness_util");
+        assert_eq!(
+            artifacts[0].components[0].agent_format,
+            Some(AgentFormat::Markdown)
         );
     }
 
