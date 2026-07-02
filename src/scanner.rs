@@ -456,7 +456,7 @@ fn discover_agent_files(
             if path.extension().and_then(|value| value.to_str()) == Some(*extension) {
                 let name = file_stem(&path).trim_end_matches(".agent").to_owned();
                 components.insert(
-                    (format!("agent-{:?}", format).to_lowercase(), name.clone()),
+                    (format!("agent-{format:?}").to_lowercase(), name.clone()),
                     component_for_agent(path, *format),
                 );
             }
